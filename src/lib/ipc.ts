@@ -67,8 +67,16 @@ export const api = {
 
   deleteStyle: (id: number) => invoke<void>("delete_style", { id }),
 
+  resolveStyle: (appIdentifier: string) =>
+    invoke<string | null>("resolve_style", { appIdentifier }),
+
   getSetting: <T>(key: string) => invoke<T | null>("get_setting", { key }),
 
   setSetting: (key: string, value: unknown) =>
     invoke<void>("set_setting", { key, value }),
+
+  accessibilityStatus: () => invoke<boolean>("accessibility_status"),
+
+  openAccessibilitySettings: () =>
+    invoke<void>("open_accessibility_settings"),
 };

@@ -10,6 +10,10 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Other(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 impl Serialize for StoreError {
@@ -182,10 +186,10 @@ impl Store {
     }
 
     pub fn delete_transcript(&self, id: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM transcripts WHERE id = ?1",
-            params![id],
-        )?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM transcripts WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -199,10 +203,11 @@ impl Store {
 
     pub fn stats(&self) -> Result<Stats> {
         let conn = self.conn.lock().unwrap();
-        let total_words: i64 =
-            conn.query_row("SELECT COALESCE(SUM(word_count), 0) FROM transcripts", [], |r| {
-                r.get(0)
-            })?;
+        let total_words: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(word_count), 0) FROM transcripts",
+            [],
+            |r| r.get(0),
+        )?;
         let transcript_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM transcripts", [], |r| r.get(0))?;
 
@@ -240,7 +245,11 @@ impl Store {
         })
     }
 
-    pub fn add_dictionary_term(&self, term: &str, replacement: Option<&str>) -> Result<DictionaryEntry> {
+    pub fn add_dictionary_term(
+        &self,
+        term: &str,
+        replacement: Option<&str>,
+    ) -> Result<DictionaryEntry> {
         let starred = 0;
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -285,10 +294,10 @@ impl Store {
     }
 
     pub fn delete_dictionary_term(&self, id: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM dictionary WHERE id = ?1",
-            params![id],
-        )?;
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM dictionary WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -310,9 +319,8 @@ impl Store {
 
     pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, trigger, body, created_at FROM snippets ORDER BY trigger ASC",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT id, trigger, body, created_at FROM snippets ORDER BY trigger ASC")?;
         let rows = stmt.query_map([], |row| {
             Ok(Snippet {
                 id: row.get(0)?,
@@ -332,7 +340,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn upsert_style(&self, app_pattern: &str, label: &str, instructions: &str) -> Result<Style> {
+    pub fn upsert_style(
+        &self,
+        app_pattern: &str,
+        label: &str,
+        instructions: &str,
+    ) -> Result<Style> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO styles (app_pattern, label, instructions) VALUES (?1, ?2, ?3)
@@ -389,9 +402,11 @@ impl Store {
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         Ok(conn
-            .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
@@ -432,9 +447,11 @@ fn map_style(row: &rusqlite::Row<'_>) -> rusqlite::Result<Style> {
 }
 
 fn now_iso(conn: &Connection) -> Result<String> {
-    Ok(conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |r| {
-        r.get(0)
-    })?)
+    Ok(
+        conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |r| {
+            r.get(0)
+        })?,
+    )
 }
 
 fn local_date_today() -> String {
@@ -500,7 +517,9 @@ mod tests {
     #[test]
     fn transcript_roundtrip_and_word_count() {
         let store = memory_store();
-        store.insert_transcript("hello world foo", "um hello world foo", "en", 1200, "Slack").unwrap();
+        store
+            .insert_transcript("hello world foo", "um hello world foo", "en", 1200, "Slack")
+            .unwrap();
         let list = store.list_transcripts(10, 0).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].word_count, 3);
@@ -522,7 +541,9 @@ mod tests {
     fn dictionary_upsert_on_conflict() {
         let store = memory_store();
         store.add_dictionary_term("kubernetes", None).unwrap();
-        store.add_dictionary_term("kubernetes", Some("Kubernetes")).unwrap();
+        store
+            .add_dictionary_term("kubernetes", Some("Kubernetes"))
+            .unwrap();
         let list = store.list_dictionary().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].replacement.as_deref(), Some("Kubernetes"));
@@ -532,7 +553,9 @@ mod tests {
     fn snippet_upsert_on_conflict() {
         let store = memory_store();
         store.add_snippet("my email", "jon@example.com").unwrap();
-        store.add_snippet("my email", "jonathan@example.com").unwrap();
+        store
+            .add_snippet("my email", "jonathan@example.com")
+            .unwrap();
         let list = store.list_snippets().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].body, "jonathan@example.com");
@@ -541,19 +564,29 @@ mod tests {
     #[test]
     fn style_resolves_by_substring_case_insensitive() {
         let store = memory_store();
-        store.upsert_style("com.apple.mail", "Email formal", "Formal tone").unwrap();
+        store
+            .upsert_style("com.apple.mail", "Email formal", "Formal tone")
+            .unwrap();
         assert_eq!(
-            store.resolve_style_for_app("COM.APPLE.MAIL").unwrap().as_deref(),
+            store
+                .resolve_style_for_app("COM.APPLE.MAIL")
+                .unwrap()
+                .as_deref(),
             Some("Formal tone")
         );
-        assert_eq!(store.resolve_style_for_app("com.slack.Slack").unwrap(), None);
+        assert_eq!(
+            store.resolve_style_for_app("com.slack.Slack").unwrap(),
+            None
+        );
     }
 
     #[test]
     fn settings_roundtrip() {
         let store = memory_store();
         assert_eq!(store.get_setting("hotkey").unwrap(), None);
-        store.set_setting("hotkey", &serde_json::json!({"keys": ["Fn"]})).unwrap();
+        store
+            .set_setting("hotkey", &serde_json::json!({"keys": ["Fn"]}))
+            .unwrap();
         assert_eq!(
             store.get_setting("hotkey").unwrap().as_deref(),
             Some("{\"keys\":[\"Fn\"]}")
@@ -563,7 +596,9 @@ mod tests {
     #[test]
     fn streak_counts_consecutive_days() {
         let store = memory_store();
-        store.insert_transcript("one two three four five", "", "en", 1000, "").unwrap();
+        store
+            .insert_transcript("one two three four five", "", "en", 1000, "")
+            .unwrap();
         let stats = store.stats().unwrap();
         assert_eq!(stats.total_words, 5);
         assert_eq!(stats.streak_days, 1);
