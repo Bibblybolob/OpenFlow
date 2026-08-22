@@ -105,6 +105,22 @@ npm run build                                     # TS typecheck + vite build
 
 CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and frontend builds on both macOS and Windows runners; tags (`v*`) cut signed release bundles via tauri-action.
 
+## Troubleshooting
+
+### macOS: "FlowClone is damaged and can't be opened" / no "Open Anyway"
+
+Release DMGs are currently **ad-hoc signed** (no Apple Developer certificate), so Gatekeeper's download-provenance check fails and macOS may refuse to open the app *without* offering "Open Anyway". Remove the quarantine flag once after installing:
+
+```bash
+xattr -cr /Applications/FlowClone.app
+```
+
+The app then launches normally. Long-term fix requires an Apple Developer certificate: add the six `APPLE_*` secrets (uncomment them in `.github/workflows/ci.yml`) and future releases will be signed and notarized.
+
+### Windows: SmartScreen warning on first install
+
+Unsigned installers trigger "Windows protected your PC". Click **More info → Run anyway**, or use the `.msi` variant. Injection into apps running as Administrator requires OpenFlow to run elevated too.
+
 ## Milestones
 
 | # | Scope | Status |
