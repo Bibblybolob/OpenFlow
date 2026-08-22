@@ -2,7 +2,7 @@
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{is_accessibility_trusted, paste_text};
+pub use macos::{frontmost_app, is_accessibility_trusted, paste_text};
 
 #[cfg(not(target_os = "macos"))]
 pub fn is_accessibility_trusted() -> bool {
@@ -12,4 +12,9 @@ pub fn is_accessibility_trusted() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn paste_text(_text: &str) -> Result<(), String> {
     Err("text injection is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn frontmost_app() -> String {
+    String::new()
 }

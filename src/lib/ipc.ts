@@ -79,4 +79,8 @@ export const api = {
 
   openAccessibilitySettings: () =>
     invoke<void>("open_accessibility_settings"),
+
+  toggleRecording: () => invoke<string>("toggle_recording"),
+
+  cancelRecording: () => invoke<void>("cancel_recording"),
 };

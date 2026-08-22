@@ -1,34 +1,62 @@
 import { useEffect, useState } from "react";
 import { api } from "../../lib/ipc";
 
+type ProviderChoice = "auto" | "openai" | "anthropic";
+
 const DEFAULTS: { key: string; label: string; value: string }[] = [
   { key: "pushToTalk", label: "Push to talk", value: "Hold F5" },
   { key: "cancel", label: "Cancel dictation", value: "Esc" },
 ];
 
 export default function Settings() {
-  const [apiKey, setApiKey] = useState("");
-  const [savedKey, setSavedKey] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [anthropicKey, setAnthropicKey] = useState("");
+  const [savedOpenai, setSavedOpenai] = useState(false);
+  const [savedAnthropic, setSavedAnthropic] = useState(false);
+  const [provider, setProvider] = useState<ProviderChoice>("auto");
+  const [model, setModel] = useState("");
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
-
-  async function refresh() {
-    const stored = await api.getSetting<string>("openaiApiKey");
-    setSavedKey(stored ?? null);
-    setApiKey(stored ? maskKey(stored) : "");
-    setAccessibility(await invokeAccessibility());
-  }
 
   useEffect(() => {
     refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function save() {
-    const trimmed = apiKey.trim();
-    if (!trimmed || trimmed === maskKey(savedKey ?? "")) return;
-    setSaving(true);
-    await api.setSetting("openaiApiKey", trimmed);
-    setSaving(false);
+  async function refresh() {
+    const ok = await api.getSetting<string>("openaiApiKey");
+    const ak = await api.getSetting<string>("anthropicApiKey");
+    const prov =
+      ((await api.getSetting<string>("llmProvider")) as ProviderChoice) ?? "auto";
+    const mdl = await api.getSetting<string>("llmModel");
+
+    setSavedOpenai(Boolean(ok));
+    setSavedAnthropic(Boolean(ak));
+    setOpenaiKey(maskKey(ok));
+    setAnthropicKey(maskKey(ak));
+    setProvider(prov ?? "auto");
+    setModel(mdl ?? "");
+    setAccessibility(await invokeAccessibility());
+  }
+
+  async function saveKey(kind: "openai" | "anthropic") {
+    if (kind === "openai") {
+      const value = openaiKey.trim();
+      if (!value || value.includes("•")) return;
+      await api.setSetting("openaiApiKey", value);
+    } else {
+      const value = anthropicKey.trim();
+      if (!value || value.includes("•")) return;
+      await api.setSetting("anthropicApiKey", value);
+    }
+    refresh();
+  }
+
+  async function saveCleanup() {
+    await api.setSetting(
+      "llmProvider",
+      provider === "auto" ? "auto" : provider,
+    );
+    await api.setSetting("llmModel", model.trim() || "");
     refresh();
   }
 
@@ -37,34 +65,74 @@ export default function Settings() {
       <div>
         <h1 className="text-xl font-semibold">Settings</h1>
         <p className="mt-1 text-sm text-neutral-500">
-          Shortcuts, transcription, and privacy configuration.
+          Transcription, cleanup LLM, permissions, and shortcuts.
         </p>
       </div>
 
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
-          Transcription
+          API keys
         </h2>
-        <div className="flex items-center gap-2">
+        <KeyRow
+          label="OpenAI"
+          hint="Used for transcription; also available for cleanup"
+          saved={savedOpenai}
+          value={openaiKey}
+          onChange={setOpenaiKey}
+          onSave={() => saveKey("openai")}
+          placeholder="sk-…"
+        />
+        <KeyRow
+          label="Claude (Anthropic)"
+          hint="Optional alternative for the cleanup step"
+          saved={savedAnthropic}
+          value={anthropicKey}
+          onChange={setAnthropicKey}
+          onSave={() => saveKey("anthropic")}
+          placeholder="sk-ant-…"
+        />
+        <p className="text-xs text-neutral-600">
+          Keys are stored locally on this device. Environment variables
+          OPENAI_API_KEY / ANTHROPIC_API_KEY take precedence when set.
+        </p>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
+          Cleanup
+        </h2>
+        <div className="flex gap-2">
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value as ProviderChoice)}
+            className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm outline-none focus:border-indigo-400/60"
+          >
+            <option value="auto">Auto-detect</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Claude</option>
+          </select>
           <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="OpenAI API key (sk-…)"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder={
+              provider === "anthropic"
+                ? "claude-3-5-haiku-latest (default)"
+                : provider === "openai"
+                  ? "gpt-4o-mini (default)"
+                  : "Model override (optional)"
+            }
             className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
           />
           <button
-            onClick={save}
-            disabled={saving}
-            className="rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
+            onClick={saveCleanup}
+            className="rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
           >
             Save
           </button>
         </div>
         <p className="text-xs text-neutral-600">
-          Stored locally on this device. The OPENAI_API_KEY environment
-          variable takes precedence when set.
-          {savedKey && " A key is currently saved."}
+          Auto-detect prefers OpenAI when both keys exist. If cleanup fails,
+          your raw dictation is pasted anyway so nothing is ever lost.
         </p>
       </section>
 
@@ -79,8 +147,8 @@ export default function Settings() {
             ok={accessibility === true}
             hint={
               accessibility === false
-                ? "Required to paste text"
-                : "Needed to paste text at your cursor"
+                ? "Required to paste text and detect the frontmost app"
+                : "Needed to paste at your cursor and match app styles"
             }
             action={
               accessibility === false ? (
@@ -114,6 +182,51 @@ export default function Settings() {
           ))}
         </div>
       </section>
+    </div>
+  );
+}
+
+function KeyRow({
+  label,
+  hint,
+  saved,
+  value,
+  onChange,
+  onSave,
+  placeholder,
+}: {
+  label: string;
+  hint: string;
+  saved: boolean;
+  value: string;
+  onChange: (v: string) => void;
+  onSave: () => void;
+  placeholder: string;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <div className="w-40 shrink-0">
+        <p className="text-sm text-neutral-300">{label}</p>
+        <p className="text-[11px] leading-tight text-neutral-600">{hint}</p>
+      </div>
+      <input
+        type="password"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
+      />
+      {saved && !value.includes("•") && null}
+      <button
+        onClick={onSave}
+        className={`shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition ${
+          value && !value.includes("•")
+            ? "bg-indigo-500/90 text-white hover:bg-indigo-500"
+            : "border border-white/10 text-neutral-500"
+        }`}
+      >
+        {saved ? "Update" : "Save"}
+      </button>
     </div>
   );
 }

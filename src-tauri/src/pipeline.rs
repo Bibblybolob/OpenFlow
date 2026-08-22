@@ -2,16 +2,21 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::audio::AudioEngine;
-use crate::cloud::stt;
-use crate::hotkey::{HotkeyEvent, HotkeyWatcher, PushToTalkWatcher};
+use crate::cloud::{llm, stt};
+use crate::hotkey::{
+    HotkeyEvent, HotkeyWatcher, PushToTalkWatcher, SharedHotkeyConfig,
+};
 use crate::inject;
 use crate::store::{Store, Transcript};
+
+const MAX_SESSION_SECS: u64 = 360;
+const DOUBLE_TAP_WINDOW_MS: u64 = 700;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,28 +62,33 @@ pub struct PipelineEvent {
 
 enum Msg {
     Hotkey(HotkeyEvent),
+    Cancel,
 }
 
 pub struct Pipeline {
     state: Arc<AtomicU8>,
-    _tx: mpsc::Sender<Msg>,
+    control_tx: mpsc::Sender<Msg>,
 }
 
 impl Pipeline {
-    pub fn start(app: AppHandle, db: Arc<Store>) -> Self {
+    pub fn start(app: AppHandle, db: Arc<Store>, hotkey_config: SharedHotkeyConfig) -> Self {
         let (tx, rx) = mpsc::channel::<Msg>();
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
         if inject::is_accessibility_trusted() {
-            PushToTalkWatcher::default().spawn(hk_tx);
+            PushToTalkWatcher {
+                config: hotkey_config,
+                poll_interval_ms: 20,
+            }
+            .spawn(hk_tx);
         } else {
             eprintln!("dictation disabled: grant Accessibility permission in System Settings");
         }
-        let keepalive_tx = tx.clone();
+        let fwd_tx = tx.clone();
         std::thread::spawn(move || {
             while let Ok(event) = hk_rx.recv() {
-                if tx.send(Msg::Hotkey(event)).is_err() {
+                if fwd_tx.send(Msg::Hotkey(event)).is_err() {
                     return;
                 }
             }
@@ -91,7 +101,7 @@ impl Pipeline {
 
         Self {
             state,
-            _tx: keepalive_tx,
+            control_tx: tx,
         }
     }
 
@@ -101,6 +111,38 @@ impl Pipeline {
             2 => PipelineState::Transcribing,
             3 => PipelineState::Injecting,
             _ => PipelineState::Idle,
+        }
+    }
+
+    /// Starts a recording without the hotkey (Flow Bar click).
+    /// Returns false when the pipeline is busy.
+    pub fn start_manual(&self) -> bool {
+        if self.current() != PipelineState::Idle {
+            return false;
+        }
+        self.control_tx.send(Msg::Hotkey(HotkeyEvent::Down)).is_ok()
+    }
+
+    /// Finishes the active recording (Flow Bar click or Esc).
+    pub fn stop_manual(&self) {
+        let _ = self.control_tx.send(Msg::Hotkey(HotkeyEvent::Up));
+    }
+
+    /// Cancels the active session, discarding audio (Esc while recording).
+    pub fn cancel(&self) {
+        let _ = self.control_tx.send(Msg::Cancel);
+    }
+
+    /// Starts or finishes a recording (Flow Bar click).
+    pub fn toggle(&self) {
+        match self.current() {
+            PipelineState::Idle => {
+                self.start_manual();
+            }
+            PipelineState::Recording => {
+                self.stop_manual();
+            }
+            _ => {}
         }
     }
 }
@@ -128,10 +170,26 @@ fn fail(app: &AppHandle, state: &AtomicU8, message: String) {
 
 fn handler_loop(app: AppHandle, db: Arc<Store>, rx: mpsc::Receiver<Msg>, state: Arc<AtomicU8>) {
     let mut audio = AudioEngine::new();
+    let mut current_app = String::new();
+    {
+        let emitter = app.clone();
+        let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        audio.set_level_callback(move |level| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let prev = last_emit.swap(now, Ordering::Relaxed);
+            if now.saturating_sub(prev) >= 33 {
+                let _ = emitter.emit("audio-level", level);
+            }
+        });
+    }
 
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Hotkey(HotkeyEvent::Down) => {
+                current_app = inject::frontmost_app();
                 if audio.start().is_err() {
                     continue;
                 }
@@ -148,7 +206,14 @@ fn handler_loop(app: AppHandle, db: Arc<Store>, rx: mpsc::Receiver<Msg>, state: 
             Msg::Hotkey(HotkeyEvent::Up) => {
                 let wav_path = temp_wav_path();
                 match audio.stop(&wav_path) {
-                    Ok(Some(duration_ms)) => run_session(&app, &db, &state, &wav_path, duration_ms),
+                    Ok(Some(duration_ms)) => run_session(
+                        &app,
+                        &db,
+                        &state,
+                        &wav_path,
+                        duration_ms,
+                        std::mem::take(&mut current_app),
+                    ),
                     Ok(None) => {
                         let _ = std::fs::remove_file(&wav_path);
                         set_state(&state, PipelineState::Idle);
@@ -164,6 +229,18 @@ fn handler_loop(app: AppHandle, db: Arc<Store>, rx: mpsc::Receiver<Msg>, state: 
                     Err(e) => fail(&app, &state, e.to_string()),
                 }
             }
+            Msg::Cancel => {
+                audio.discard();
+                set_state(&state, PipelineState::Idle);
+                emit(
+                    &app,
+                    PipelineEvent {
+                        state: PipelineState::Idle,
+                        error: None,
+                        transcript: None,
+                    },
+                );
+            }
         }
     }
 }
@@ -174,6 +251,7 @@ fn run_session(
     state: &Arc<AtomicU8>,
     wav_path: &std::path::Path,
     duration_ms: i64,
+    target_app: String,
 ) {
     set_state(state, PipelineState::Transcribing);
     emit(
@@ -196,12 +274,20 @@ fn run_session(
     let result = stt::transcribe(db, wav_path, &language, Some(&db_prompt(db)));
     let _ = std::fs::remove_file(wav_path);
 
-    let text = match result {
+    let raw_text = match result {
         Ok(r) => r.text,
         Err(e) => return fail(app, state, e.to_string()),
     };
-    if text.trim().is_empty() {
+    if raw_text.trim().is_empty() {
         return fail(app, state, "transcription came back empty".to_string());
+    }
+
+    let data = SessionData::new(duration_ms, target_app, language);
+
+    // Fast path: whole utterance matches a snippet trigger — no LLM call.
+    let snippet = crate::cloud::try_snippet(db, &raw_text).unwrap_or(None);
+    if let Some(expanded) = snippet {
+        return finish(app, db, state, &expanded, &raw_text, &data);
     }
 
     set_state(state, PipelineState::Injecting);
@@ -214,16 +300,71 @@ fn run_session(
         },
     );
 
-    if let Err(e) = inject::paste_text(&text) {
-        store_anyway(db, &text, duration_ms, &language);
-        return fail(
+    // LLM cleanup; fall back to the raw transcription on any failure so a
+    // cleanup outage never costs the user their dictation.
+    let polished = match llm::polish(db, &raw_text, &data.target_app) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("cleanup skipped: {e}");
+            emit_warning(app, format!("cleanup unavailable — pasted raw text ({e})"));
+            raw_text.clone()
+        }
+    };
+
+    finish(app, db, state, &polished, &raw_text, &data);
+}
+
+struct SessionData {
+    duration_ms: i64,
+    target_app: String,
+    language: String,
+}
+
+impl SessionData {
+    fn new(duration_ms: i64, target_app: String, language: String) -> Self {
+        Self {
+            duration_ms,
+            target_app,
+            language,
+        }
+    }
+}
+
+fn finish(
+    app: &AppHandle,
+    db: &Arc<Store>,
+    state: &Arc<AtomicU8>,
+    final_text: &str,
+    raw_text: &str,
+    data: &SessionData,
+) {
+    set_state(state, PipelineState::Injecting);
+    emit(
+        app,
+        PipelineEvent {
+            state: PipelineState::Injecting,
+            error: None,
+            transcript: None,
+        },
+    );
+
+    if let Err(e) = inject::paste_text(final_text) {
+        store_anyway(db, final_text, raw_text, data);
+        fail(
             app,
             state,
             format!("paste failed: {e} — text saved to history"),
         );
+        return;
     }
 
-    match db.insert_transcript(&text, &text, &language, duration_ms, "") {
+    match db.insert_transcript(
+        final_text,
+        raw_text,
+        &data.language,
+        data.duration_ms,
+        &data.target_app,
+    ) {
         Ok(transcript) => {
             set_state(state, PipelineState::Idle);
             emit(
@@ -239,12 +380,25 @@ fn run_session(
     }
 }
 
-fn db_prompt(db: &Store) -> String {
-    stt::build_prompt(db).unwrap_or_default()
+fn store_anyway(db: &Store, text: &str, raw_text: &str, data: &SessionData) {
+    let _ = db.insert_transcript(
+        text,
+        raw_text,
+        &data.language,
+        data.duration_ms,
+        &data.target_app,
+    );
 }
 
-fn store_anyway(db: &Store, text: &str, duration_ms: i64, language: &str) {
-    let _ = db.insert_transcript(text, text, language, duration_ms, "");
+fn emit_warning(app: &AppHandle, message: String) {
+    let _ = app.emit(
+        "pipeline-warning",
+        serde_json::json!({ "message": message }),
+    );
+}
+
+fn db_prompt(db: &Store) -> String {
+    stt::build_prompt(db).unwrap_or_default()
 }
 
 fn temp_wav_path() -> PathBuf {

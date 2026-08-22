@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Hub from "./hub/Hub";
+import FlowBar from "./flowbar/FlowBar";
 
 function App() {
   const [route, setRoute] = useState(() => window.location.hash || "#/hub");
@@ -11,7 +12,7 @@ function App() {
   }, []);
 
   if (route.startsWith("#/flowbar")) {
-    return <div className="h-screen" data-tauri-drag-region />;
+    return <FlowBar />;
   }
   return <Hub />;
 }

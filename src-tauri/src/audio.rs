@@ -29,7 +29,7 @@ pub struct AudioEngine {
     shared: Arc<Mutex<Shared>>,
     stream: Option<cpal::Stream>,
     started_at: Option<Instant>,
-    on_level: Option<Box<dyn Fn(f32) + Send>>,
+    on_level: Option<Arc<dyn Fn(f32) + Send + Sync>>,
 }
 
 impl Default for AudioEngine {
@@ -52,9 +52,9 @@ impl AudioEngine {
     }
 
     /// Registers a callback receiving input loudness (0.0..1.0) roughly
-    /// 30x per second while recording.
-    pub fn set_level_callback(&mut self, cb: impl Fn(f32) + Send + 'static) {
-        self.on_level = Some(Box::new(cb));
+    /// 30x per second while recording. Persists across sessions.
+    pub fn set_level_callback(&mut self, cb: impl Fn(f32) + Send + Sync + 'static) {
+        self.on_level = Some(Arc::new(cb));
     }
 
     pub fn start(&mut self) -> Result<(), AudioError> {
@@ -76,24 +76,43 @@ impl AudioEngine {
             s.samples.clear();
             s.sample_rate = sample_rate;
         }
-        let err_fn = |e| eprintln!("audio stream error: {e}");
+        let err_fn = |e: cpal::StreamError| eprintln!("audio stream error: {e}");
+        let cb_a = self.on_level.clone();
+        let cb_b = self.on_level.clone();
+        let cb_c = self.on_level.clone();
 
         let stream = match format {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
-                move |data: &[f32], _| push(&shared, data.iter().copied()),
+                move |data: &[f32], _| {
+                    push_levelled(&shared, &cb_a, data.iter().copied(), data.len())
+                },
                 err_fn,
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &config.into(),
-                move |data: &[i16], _| push(&shared, data.iter().map(|&s| s.to_sample::<f32>())),
+                move |data: &[i16], _| {
+                    push_levelled(
+                        &shared,
+                        &cb_b,
+                        data.iter().map(|&s| s.to_sample::<f32>()),
+                        data.len(),
+                    )
+                },
                 err_fn,
                 None,
             ),
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config.into(),
-                move |data: &[u16], _| push(&shared, data.iter().map(|&s| s.to_sample::<f32>())),
+                move |data: &[u16], _| {
+                    push_levelled(
+                        &shared,
+                        &cb_c,
+                        data.iter().map(|&s| s.to_sample::<f32>()),
+                        data.len(),
+                    )
+                },
                 err_fn,
                 None,
             ),
@@ -138,11 +157,31 @@ impl AudioEngine {
         encode_wav(&samples, sample_rate, path)?;
         Ok(Some(elapsed_ms))
     }
+
+    /// Stops capture and throws the audio away (Esc-cancel).
+    pub fn discard(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            drop(stream);
+        }
+        self.started_at = None;
+        self.shared.lock().unwrap().samples.clear();
+    }
 }
 
-fn push(shared: &Arc<Mutex<Shared>>, iter: impl Iterator<Item = f32>) {
+fn push_levelled(
+    shared: &Arc<Mutex<Shared>>,
+    level_cb: &Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    iter: impl Iterator<Item = f32>,
+    frame_count: usize,
+) {
     let mut s = shared.lock().unwrap();
     s.samples.extend(iter);
+    if let Some(cb) = level_cb {
+        let start = s.samples.len().saturating_sub(frame_count);
+        let recent = &s.samples[start..];
+        let rms = (recent.iter().map(|x| x * x).sum::<f32>() / recent.len().max(1) as f32).sqrt();
+        cb((rms * 4.0).clamp(0.0, 1.0));
+    }
 }
 
 fn encode_wav(samples: &[f32], sample_rate: u32, path: &Path) -> Result<(), hound::Error> {

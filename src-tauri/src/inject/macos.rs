@@ -12,6 +12,25 @@ pub fn is_accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
+/// Bundle identifier (e.g. "com.apple.Mail") of the frontmost application,
+/// used for per-app style resolution. Best-effort: empty string on failure.
+pub fn frontmost_app() -> String {
+    let script = r#"
+        tell application "System Events"
+            set frontApp to first process whose frontmost is true
+            return bundle identifier of frontApp
+        end tell
+    "#;
+    Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Pastes text at the current cursor location by placing it on the clipboard,
 /// synthesizing Cmd+V via System Events, then restoring the previous
 /// clipboard contents once the target app has read it.

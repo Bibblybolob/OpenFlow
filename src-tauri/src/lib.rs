@@ -23,6 +23,43 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
     f(&state.db)
 }
 
+const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
+
+fn create_flowbar(app: &tauri::AppHandle, db: &Store) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::{PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+
+    let saved: Option<(f64, f64)> = db
+        .get_setting("flowBarPos")?
+        .and_then(|v| serde_json::from_str(&v).ok());
+
+    let window = WebviewWindowBuilder::new(app, "flowbar", WebviewUrl::App("/#/flowbar".into()))
+        .title("FlowBar")
+        .inner_size(FLOWBAR_SIZE.0, FLOWBAR_SIZE.1)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .focused(false)
+        .focusable(false)
+        .visible(true)
+        .build()?;
+
+    if let Some((x, y)) = saved {
+        window.set_position(PhysicalPosition::new(x, y))?;
+    } else if let Some(monitor) = app.primary_monitor()? {
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let bar_w = FLOWBAR_SIZE.0 * scale;
+        let bar_h = FLOWBAR_SIZE.1 * scale;
+        let x = ((size.width as f64 - bar_w) / 2.0).max(0.0);
+        let y = (size.height as f64 - bar_h - 48.0 * scale).max(0.0);
+        window.set_position(PhysicalPosition::new(x, y))?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn insert_transcript(
     state: tauri::State<AppState>,
@@ -171,6 +208,17 @@ fn pipeline_status(state: tauri::State<AppState>) -> pipeline::PipelineState {
 }
 
 #[tauri::command]
+fn toggle_recording(state: tauri::State<AppState>) -> pipeline::PipelineState {
+    state.pipeline.toggle();
+    state.pipeline.current()
+}
+
+#[tauri::command]
+fn cancel_recording(state: tauri::State<AppState>) {
+    state.pipeline.cancel();
+}
+
+#[tauri::command]
 fn accessibility_status() -> bool {
     inject::is_accessibility_trusted()
 }
@@ -194,6 +242,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let db = Arc::new(Store::open(&dir.join("flowclone.db"))?);
+            create_flowbar(app.handle(), &db)?;
             let pipeline = Pipeline::start(app.handle().clone(), Arc::clone(&db));
             app.manage(AppState { db, pipeline });
             Ok(())
@@ -220,6 +269,8 @@ pub fn run() {
             get_setting,
             set_setting,
             pipeline_status,
+            toggle_recording,
+            cancel_recording,
             accessibility_status,
             open_accessibility_settings
         ])
