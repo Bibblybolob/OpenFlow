@@ -1,14 +1,16 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Sidebar, { type Page } from "./components/Sidebar";
-import { usePipelineState } from "./usePipelineState";
+import Onboarding from "./pages/Onboarding";
+import Settings from "./pages/Settings";
 import Home from "./pages/Home";
 import Dictionary from "./pages/Dictionary";
 import Snippets from "./pages/Snippets";
 import Style from "./pages/Style";
-import Settings from "./pages/Settings";
+import { api } from "../lib/ipc";
+import { usePipelineState } from "./usePipelineState";
 
 const LABELS: Record<string, string> = {
-  idle: "Ready · hold F5 to talk",
+  idle: "Ready · hold hotkey to talk",
   recording: "Recording…",
   transcribing: "Transcribing…",
   injecting: "Pasting…",
@@ -16,7 +18,30 @@ const LABELS: Record<string, string> = {
 
 export default function Hub() {
   const [page, setPage] = useState<Page>("home");
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
   const { state, error, lastTranscriptId } = usePipelineState();
+
+  useEffect(() => {
+    api
+      .getSetting<boolean>("onboardingComplete")
+      .then((v) => setOnboarded(v ?? false))
+      .catch(() => setOnboarded(false));
+  }, []);
+
+  if (onboarded === null) {
+    return <div className="h-screen bg-[#0d0d10]" />;
+  }
+
+  if (!onboarded) {
+    return (
+      <Onboarding
+        onComplete={() => {
+          setOnboarded(true);
+          setPage("home");
+        }}
+      />
+    );
+  }
 
   let statusContent: ReactNode = LABELS[state];
   if (error) statusContent = <span className="text-red-400">{error}</span>;
@@ -29,7 +54,15 @@ export default function Hub() {
         {page === "dictionary" && <Dictionary />}
         {page === "snippets" && <Snippets />}
         {page === "style" && <Style />}
-        {page === "settings" && <Settings />}
+        {page === "settings" && (
+          <Settings
+            onRerunSetup={async () => {
+              await api.setFlowbarVisible(false);
+              await api.setSetting("onboardingComplete", false);
+              setOnboarded(false);
+            }}
+          />
+        )}
       </main>
       <div
         className={`pointer-events-none absolute right-6 bottom-5 rounded-full px-4 py-1.5 text-xs shadow-lg backdrop-blur transition-colors ${

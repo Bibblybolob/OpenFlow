@@ -92,4 +92,9 @@ export const api = {
 
   setAutostart: (enable: boolean) =>
     invoke<void>("autostart_set", { enable }),
+
+  checkMicPermission: () => invoke<void>("check_mic_permission"),
+
+  setFlowbarVisible: (visible: boolean) =>
+    invoke<void>("set_flowbar_visible", { visible }),
 };

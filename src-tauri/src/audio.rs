@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Sample;
@@ -165,6 +165,41 @@ impl AudioEngine {
         }
         self.started_at = None;
         self.shared.lock().unwrap().samples.clear();
+    }
+
+    /// Opens a short-lived capture stream to (a) trigger macOS's mic
+    /// permission prompt on first use and (b) verify an input device works.
+    pub fn probe(&mut self) -> Result<(), AudioError> {
+        let host = cpal::default_host();
+        let device = host.default_input_device().ok_or(AudioError::NoDevice)?;
+        let config = device
+            .default_input_config()
+            .map_err(|e| AudioError::Stream(e.to_string()))?;
+        let format = config.sample_format();
+        let err_fn = |e: cpal::StreamError| eprintln!("audio probe error: {e}");
+        let stream = match format {
+            cpal::SampleFormat::F32 => {
+                device.build_input_stream(&config.into(), |_: &[f32], _| {}, err_fn, None)
+            }
+            cpal::SampleFormat::I16 => {
+                device.build_input_stream(&config.into(), |_: &[i16], _| {}, err_fn, None)
+            }
+            cpal::SampleFormat::U16 => {
+                device.build_input_stream(&config.into(), |_: &[u16], _| {}, err_fn, None)
+            }
+            other => {
+                return Err(AudioError::Stream(format!(
+                    "unsupported sample format: {other}"
+                )))
+            }
+        }
+        .map_err(|e| AudioError::Stream(e.to_string()))?;
+        stream
+            .play()
+            .map_err(|e| AudioError::Stream(e.to_string()))?;
+        std::thread::sleep(Duration::from_millis(120));
+        drop(stream);
+        Ok(())
     }
 }
 

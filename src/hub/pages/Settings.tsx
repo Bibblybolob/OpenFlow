@@ -45,7 +45,11 @@ const HOTKEY_CHOICES = [
   "Right Cmd",
 ];
 
-export default function Settings() {
+export default function Settings({
+  onRerunSetup,
+}: {
+  onRerunSetup: () => void;
+}) {
   const [openaiKey, setOpenaiKey] = useState("");
   const [anthropicKey, setAnthropicKey] = useState("");
   const [savedOpenai, setSavedOpenai] = useState(false);
@@ -151,6 +155,13 @@ export default function Settings() {
           Transcription, cleanup LLM, permissions, and shortcuts.
         </p>
       </div>
+
+      <button
+        onClick={onRerunSetup}
+        className="self-start rounded-lg border border-white/10 px-4 py-2 text-xs text-neutral-400 transition hover:bg-white/5"
+      >
+        Run setup wizard again
+      </button>
 
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">

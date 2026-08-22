@@ -273,6 +273,29 @@ fn autostart_set(app: tauri::AppHandle, enable: bool) -> store::Result<()> {
     result.map_err(|e| store::StoreError::Other(e.to_string()))
 }
 
+#[tauri::command]
+fn check_mic_permission() -> store::Result<bool> {
+    let mut probe = audio::AudioEngine::new();
+    match probe.probe() {
+        Ok(()) => Ok(true),
+        Err(e) => Err(store::StoreError::Other(format!(
+            "microphone unavailable: {e} — check permission in System Settings"
+        ))),
+    }
+}
+
+#[tauri::command]
+fn set_flowbar_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("flowbar")
+        .ok_or("flowbar window not found")?;
+    if visible {
+        window.show().map_err(|e| e.to_string())
+    } else {
+        window.hide().map_err(|e| e.to_string())
+    }
+}
+
 fn load_hotkey_config(db: &Store) -> SharedHotkeyConfig {
     let mut config = HotkeyConfig::default();
     if let Some(names) = db
@@ -356,6 +379,8 @@ pub fn run() {
             set_hotkey,
             autostart_status,
             autostart_set,
+            check_mic_permission,
+            set_flowbar_visible,
             accessibility_status,
             open_accessibility_settings
         ])

@@ -25,6 +25,7 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and 
 - **History & stats** — searchable transcript history grouped by day, word counts, streaks.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
 - **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers; applies live.
+- **Guided onboarding** — first-launch wizard walks through Accessibility + microphone permissions with live checks, then a real dictation test unlocks the app.
 - **Privacy-first storage** — everything local in SQLite; audio is transient; keys stay on-device.
 
 ## Architecture
@@ -107,7 +108,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and frontend builds on 
 | 5 | Hands-free, hotkey customization, languages, autostart | ✅ |
 | 6 | Voice commands, error auto-dismiss polish | ✅ |
 | 7 | Windows port (SendInput injection, frontmost app) | ✅ |
-| 8 | Onboarding wizard + permission gates | ⏳ |
+| 8 | Onboarding wizard + permission gates | ✅ |
 | 9 | Signing/notarization, packaging, auto-update | ⏳ |
 
 ## License
