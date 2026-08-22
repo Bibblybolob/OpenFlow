@@ -1,5 +1,5 @@
 # OpenFlow
-
+# VIBE-CODED
 Push-to-talk dictation for macOS. Hold a hotkey, speak, release — your words are transcribed in the cloud, cleaned up by an LLM, and pasted at your cursor. Built with Tauri 2, React and TypeScript.
 
 ## Features
