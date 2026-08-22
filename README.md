@@ -15,13 +15,13 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and 
 
 - **Push-to-talk dictation** — hold the hotkey (default `F5`), speak, release. Text is transcribed, cleaned up by an LLM, and pasted at your cursor.
 - **Hands-free mode** — double-tap the hotkey to keep recording without holding; tap again or press Esc to finish.
-- **AI cleanup** — GPT-4o-mini (OpenAI) or Claude (Anthropic) rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), backtrack handling.
-- **Pluggable LLM providers** — bring an OpenAI key, a Claude key, or both; auto-detect or force a provider per your preference.
+- **AI cleanup** — GPT-4o-mini (OpenAI), Claude (Anthropic), or any model via OpenRouter rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), backtrack handling.
+- **Pluggable LLM providers** — bring an OpenAI, Claude, OpenRouter, or mix of keys; auto-detect or force a provider per your preference.
 - **Voice commands** — say "open youtube", "search rust async", or "copy …" to act instead of typing (toggleable).
 - **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct.
 - **Snippets** — voice shortcuts that expand to full text locally, with zero API latency on exact matches.
 - **Per-app styles** — tone instructions matched against the frontmost app's bundle identifier (e.g., formal in Mail, casual in Slack).
-- **Flow Bar** — floating, focus-safe pill with live waveform, drag-to-position, click-to-dictate.
+- **Flow Bar** — floating, focus-safe pill with live waveform, click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts).
 - **History & stats** — searchable transcript history grouped by day, word counts, streaks.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
 - **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers; applies live.

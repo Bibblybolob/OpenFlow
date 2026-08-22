@@ -4,6 +4,7 @@ use crate::store::{Result, Store, StoreError};
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-3-5-haiku-latest";
+const DEFAULT_OPENROUTER_MODEL: &str = "anthropic/claude-3.5-haiku";
 const MAX_PROMPT_CHARS: usize = 6_000;
 
 pub const SYSTEM_PROMPT: &str = "You clean up raw speech-to-text dictation. Rewrite the dictated text as polished written prose.\n\
@@ -35,6 +36,9 @@ pub fn polish(db: &Store, raw_text: &str, app_identifier: &str) -> Result<String
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &cfg.api_key)
             .header("anthropic-version", "2023-06-01"),
+        Provider::OpenRouter => client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .bearer_auth(&cfg.api_key),
     };
 
     let resp = req
@@ -58,6 +62,7 @@ pub fn polish(db: &Store, raw_text: &str, app_identifier: &str) -> Result<String
 pub enum Provider {
     OpenAi,
     Anthropic,
+    OpenRouter,
 }
 
 impl Provider {
@@ -65,6 +70,7 @@ impl Provider {
         match self {
             Provider::OpenAi => "openai",
             Provider::Anthropic => "anthropic",
+            Provider::OpenRouter => "openrouter",
         }
     }
 }
@@ -94,32 +100,29 @@ fn setting_string(db: &Store, key: &str) -> Option<String> {
 
 /// Resolution order per provider key: Settings value first, then env var.
 /// Provider selection: explicit `llmProvider` setting wins; otherwise auto —
-/// whichever key is available (OpenAI preferred on ties). Errors name both.
+/// whichever key is available (OpenAI → Anthropic → OpenRouter). Errors name
+/// all options.
 pub fn resolve_config(db: &Store) -> Result<CleanupConfig> {
-    let openai_key = setting_string(db, "openaiApiKey")
-        .filter(|k| !k.trim().is_empty())
-        .or_else(|| {
-            std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|k| !k.trim().is_empty())
-        });
-    let anthropic_key = setting_string(db, "anthropicApiKey")
-        .filter(|k| !k.trim().is_empty())
-        .or_else(|| {
-            std::env::var("ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|k| !k.trim().is_empty())
-        });
+    let key_from = |setting_key: &str, env_key: &str| -> Option<String> {
+        setting_string(db, setting_key)
+            .filter(|k| !k.trim().is_empty())
+            .or_else(|| std::env::var(env_key).ok().filter(|k| !k.trim().is_empty()))
+    };
+    let openai_key = key_from("openaiApiKey", "OPENAI_API_KEY");
+    let anthropic_key = key_from("anthropicApiKey", "ANTHROPIC_API_KEY");
+    let openrouter_key = key_from("openrouterApiKey", "OPENROUTER_API_KEY");
 
     let provider = match setting_string(db, "llmProvider").as_deref() {
         Some("openai") => Some(Provider::OpenAi),
         Some("anthropic") => Some(Provider::Anthropic),
+        Some("openrouter") => Some(Provider::OpenRouter),
         _ => None,
     }
-    .or(match (&openai_key, &anthropic_key) {
-        (Some(_), _) => Some(Provider::OpenAi),
-        (None, Some(_)) => Some(Provider::Anthropic),
-        (None, None) => None,
+    .or(match (&openai_key, &anthropic_key, &openrouter_key) {
+        (Some(_), _, _) => Some(Provider::OpenAi),
+        (None, Some(_), _) => Some(Provider::Anthropic),
+        (None, None, Some(_)) => Some(Provider::OpenRouter),
+        (None, None, None) => None,
     });
 
     let model_setting = setting_string(db, "llmModel").filter(|m| !m.trim().is_empty());
@@ -135,8 +138,14 @@ pub fn resolve_config(db: &Store) -> Result<CleanupConfig> {
             model: model_setting.unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string()),
             provider: Provider::Anthropic,
         }),
+        Some(Provider::OpenRouter) => Ok(CleanupConfig {
+            api_key: openrouter_key.ok_or(missing_key_err("openrouter"))?,
+            model: model_setting.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
+            provider: Provider::OpenRouter,
+        }),
         None => Err(StoreError::Other(
-            "no LLM configured — add an OpenAI or Claude API key in Settings".to_string(),
+            "no LLM configured — add an OpenAI, Claude, or OpenRouter API key in Settings"
+                .to_string(),
         )),
     }
 }
@@ -156,7 +165,8 @@ pub fn build_request_body(
 ) -> Result<Value> {
     let user_prompt = build_user_prompt(raw_text, style_instructions, db)?;
     Ok(match provider {
-        Provider::OpenAi => json!({
+        // OpenRouter speaks the OpenAI chat-completions dialect.
+        Provider::OpenAi | Provider::OpenRouter => json!({
             "model": model,
             "temperature": 0,
             "messages": [
@@ -223,7 +233,8 @@ pub fn extract_text(provider: Provider, response_body: &str) -> Result<String> {
     let parsed: Value = serde_json::from_str(response_body)
         .map_err(|e| StoreError::Other(format!("bad cleanup response: {e}")))?;
     let text = match provider {
-        Provider::OpenAi => parsed["choices"][0]["message"]["content"]
+        // OpenRouter mirrors the OpenAI response schema.
+        Provider::OpenAi | Provider::OpenRouter => parsed["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -249,6 +260,23 @@ fn truncate(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serializes env-mutating config tests and neutralizes ambient provider
+    /// keys so resolution logic is deterministic on any machine.
+    pub fn scrub_env() -> MutexGuard<'static, ()> {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] {
+            std::env::set_var(key, "");
+        }
+        guard
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +346,7 @@ mod tests {
 
     #[test]
     fn resolve_config_requires_a_key() {
+        let _env = crate::cloud::llm::test_support::scrub_env();
         let db = store();
         // No keys anywhere: explicit provider selection must fail with a
         // helpful error; auto-selection must fail too.
@@ -327,11 +356,12 @@ mod tests {
         assert!(err.contains("openai"));
 
         let err2 = resolve_config(&store()).unwrap_err().to_string();
-        assert!(err2.contains("OpenAI or Claude"));
+        assert!(err2.contains("OpenAI, Claude, or OpenRouter"));
     }
 
     #[test]
     fn resolve_config_explicit_provider_uses_its_key() {
+        let _env = crate::cloud::llm::test_support::scrub_env();
         let db = store();
         db.set_setting("llmProvider", &serde_json::json!("anthropic"))
             .unwrap();
@@ -345,6 +375,7 @@ mod tests {
 
     #[test]
     fn resolve_config_auto_prefers_openai_on_ties() {
+        let _env = crate::cloud::llm::test_support::scrub_env();
         let db = store();
         db.set_setting("openaiApiKey", &serde_json::json!("sk-o"))
             .unwrap();
@@ -352,5 +383,67 @@ mod tests {
             .unwrap();
         let cfg = resolve_config(&db).unwrap();
         assert_eq!(cfg.provider, Provider::OpenAi);
+    }
+}
+
+#[cfg(test)]
+mod openrouter_tests {
+    use super::*;
+    use crate::store::Store;
+
+    fn store() -> Store {
+        Store::open(std::path::Path::new(":memory:")).unwrap()
+    }
+
+    #[test]
+    fn openrouter_body_uses_openai_shape() {
+        let db = store();
+        let body = build_request_body(Provider::OpenRouter, "m/x", "hi", "", &db).unwrap();
+        assert_eq!(body["model"], "m/x");
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn openrouter_response_parsed_like_openai() {
+        let body = r#"{"choices":[{"message":{"content":"Done."}}]}"#;
+        assert_eq!(extract_text(Provider::OpenRouter, body).unwrap(), "Done.");
+    }
+
+    #[test]
+    fn explicit_openrouter_provider_requires_its_key() {
+        let _env = crate::cloud::llm::test_support::scrub_env();
+        let db = store();
+        db.set_setting("llmProvider", &serde_json::json!("openrouter"))
+            .unwrap();
+        db.set_setting("openaiApiKey", &serde_json::json!("sk-o"))
+            .unwrap();
+        let err = resolve_config(&db).unwrap_err().to_string();
+        assert!(err.contains("openrouter"));
+    }
+
+    #[test]
+    fn auto_falls_back_to_openrouter_key() {
+        let _env = crate::cloud::llm::test_support::scrub_env();
+        let db = store();
+        db.set_setting("openrouterApiKey", &serde_json::json!("sk-or"))
+            .unwrap();
+        let cfg = resolve_config(&db).unwrap();
+        assert_eq!(cfg.provider, Provider::OpenRouter);
+        assert_eq!(cfg.api_key, "sk-or");
+        assert_eq!(cfg.model, DEFAULT_OPENROUTER_MODEL);
+    }
+
+    #[test]
+    fn auto_prefers_openai_over_others() {
+        let _env = crate::cloud::llm::test_support::scrub_env();
+        let db = store();
+        db.set_setting("anthropicApiKey", &serde_json::json!("a"))
+            .unwrap();
+        db.set_setting("openrouterApiKey", &serde_json::json!("r"))
+            .unwrap();
+        db.set_setting("openaiApiKey", &serde_json::json!("o"))
+            .unwrap();
+        assert_eq!(resolve_config(&db).unwrap().provider, Provider::OpenAi);
     }
 }

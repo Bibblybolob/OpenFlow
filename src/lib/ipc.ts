@@ -98,6 +98,9 @@ export const api = {
   setFlowbarVisible: (visible: boolean) =>
     invoke<void>("set_flowbar_visible", { visible }),
 
+  setFlowbarPreset: (preset: string) =>
+    invoke<void>("set_flowbar_preset", { preset }),
+
   checkForUpdate: () => invoke<string | null>("check_for_update"),
 
   installUpdate: () => invoke<void>("install_update"),

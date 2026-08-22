@@ -80,6 +80,7 @@ export default function FlowBar() {
       className="flex h-screen w-screen items-center justify-center"
     >
       <div
+        data-tauri-drag-region
         className={`flex items-center gap-3 rounded-full border px-4 py-2 shadow-2xl backdrop-blur-xl transition-colors duration-200 ${
           hasError && !recording
             ? "border-red-500/40 bg-red-950/70"

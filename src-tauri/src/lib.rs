@@ -297,6 +297,54 @@ fn set_flowbar_visible(app: tauri::AppHandle, visible: bool) -> Result<(), Strin
 }
 
 #[tauri::command]
+fn set_flowbar_preset(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    preset: String,
+) -> store::Result<()> {
+    use tauri::PhysicalPosition;
+    let window = app
+        .get_webview_window("flowbar")
+        .ok_or_else(|| store::StoreError::Other("flowbar window not found".to_string()))?;
+    let monitor = app
+        .primary_monitor()
+        .map_err(|e| store::StoreError::Other(e.to_string()))?
+        .ok_or_else(|| store::StoreError::Other("no primary monitor".to_string()))?;
+    let scale = monitor.scale_factor();
+    let screen = monitor.size();
+    let bar_w = FLOWBAR_SIZE.0 * scale;
+    let bar_h = FLOWBAR_SIZE.1 * scale;
+    let margin = 24.0 * scale;
+
+    let (x, y) = match preset.as_str() {
+        "top_left" => (margin, margin),
+        "top_center" => ((screen.width as f64 - bar_w) / 2.0, margin),
+        "top_right" => (screen.width as f64 - bar_w - margin, margin),
+        "bottom_left" => (margin, screen.height as f64 - bar_h - margin),
+        "bottom_center" => (
+            (screen.width as f64 - bar_w) / 2.0,
+            screen.height as f64 - bar_h - margin,
+        ),
+        "bottom_right" => (
+            screen.width as f64 - bar_w - margin,
+            screen.height as f64 - bar_h - margin,
+        ),
+        other => {
+            return Err(store::StoreError::Other(format!(
+                "unknown position preset: {other}"
+            )))
+        }
+    };
+    let (x, y) = (x.max(0.0), y.max(0.0));
+    window
+        .set_position(PhysicalPosition::new(x, y))
+        .map_err(|e| store::StoreError::Other(e.to_string()))?;
+    with_db(&state, |db| {
+        db.set_setting("flowBarPos", &serde_json::json!([x, y]))
+    })
+}
+
+#[tauri::command]
 async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_updater::UpdaterExt;
     let update = app
@@ -414,6 +462,7 @@ pub fn run() {
             autostart_set,
             check_mic_permission,
             set_flowbar_visible,
+            set_flowbar_preset,
             check_for_update,
             install_update,
             accessibility_status,

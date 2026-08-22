@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../../lib/ipc";
 
-type ProviderChoice = "auto" | "openai" | "anthropic";
+type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter";
 
 const LANGUAGES: { code: string; label: string }[] = [
   { code: "auto", label: "Auto-detect" },
@@ -52,8 +52,11 @@ export default function Settings({
 }) {
   const [openaiKey, setOpenaiKey] = useState("");
   const [anthropicKey, setAnthropicKey] = useState("");
+  const [openrouterKey, setOpenrouterKey] = useState("");
   const [savedOpenai, setSavedOpenai] = useState(false);
   const [savedAnthropic, setSavedAnthropic] = useState(false);
+  const [savedOpenrouter, setSavedOpenrouter] = useState(false);
+  const [flowbarPreset, setFlowbarPreset] = useState("bottom_center");
   const [provider, setProvider] = useState<ProviderChoice>("auto");
   const [model, setModel] = useState("");
   const [language, setLanguage] = useState("auto");
@@ -71,6 +74,7 @@ export default function Settings({
   async function refresh() {
     const ok = await api.getSetting<string>("openaiApiKey");
     const ak = await api.getSetting<string>("anthropicApiKey");
+    const orkey = await api.getSetting<string>("openrouterApiKey");
     const prov =
       ((await api.getSetting<string>("llmProvider")) as ProviderChoice) ?? "auto";
     const mdl = await api.getSetting<string>("llmModel");
@@ -81,8 +85,10 @@ export default function Settings({
 
     setSavedOpenai(Boolean(ok));
     setSavedAnthropic(Boolean(ak));
+    setSavedOpenrouter(Boolean(orkey));
     setOpenaiKey(maskKey(ok));
     setAnthropicKey(maskKey(ak));
+    setOpenrouterKey(maskKey(orkey));
     setProvider(prov ?? "auto");
     setModel(mdl ?? "");
     setLanguage(lang ?? "auto");
@@ -92,17 +98,25 @@ export default function Settings({
     setAccessibility(await invokeAccessibility());
   }
 
-  async function saveKey(kind: "openai" | "anthropic") {
-    if (kind === "openai") {
-      const value = openaiKey.trim();
-      if (!value || value.includes("•")) return;
-      await api.setSetting("openaiApiKey", value);
-    } else {
-      const value = anthropicKey.trim();
-      if (!value || value.includes("•")) return;
-      await api.setSetting("anthropicApiKey", value);
-    }
+  async function saveKey(kind: "openai" | "anthropic" | "openrouter") {
+    const value = (kind === "openai"
+      ? openaiKey
+      : kind === "anthropic"
+        ? anthropicKey
+        : openrouterKey
+    ).trim();
+    if (!value || value.includes("•")) return;
+    await api.setSetting(`${kind}ApiKey`, value);
     refresh();
+  }
+
+  async function changeFlowbarPreset(preset: string) {
+    setFlowbarPreset(preset);
+    try {
+      await api.setFlowbarPreset(preset);
+    } catch (e) {
+      console.error(e);
+    }
   }
 
   async function saveCleanup() {
@@ -239,6 +253,29 @@ export default function Settings({
         </p>
       </section>
 
+      <section className="flex flex-col gap-2">
+        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
+          Flow Bar
+        </h2>
+        <SelectRow
+          label="Position"
+          value={flowbarPreset}
+          options={[
+            { value: "top_left", label: "Top left" },
+            { value: "top_center", label: "Top center" },
+            { value: "top_right", label: "Top right" },
+            { value: "bottom_left", label: "Bottom left" },
+            { value: "bottom_center", label: "Bottom center" },
+            { value: "bottom_right", label: "Bottom right" },
+          ]}
+          onChange={changeFlowbarPreset}
+        />
+        <p className="text-xs text-neutral-600">
+          You can also grab the pill and drag it anywhere — its spot is
+          remembered across restarts.
+        </p>
+      </section>
+
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
           API keys
@@ -261,6 +298,15 @@ export default function Settings({
           onSave={() => saveKey("anthropic")}
           placeholder="sk-ant-…"
         />
+        <KeyRow
+          label="OpenRouter"
+          hint="One key, hundreds of cleanup models"
+          saved={savedOpenrouter}
+          value={openrouterKey}
+          onChange={setOpenrouterKey}
+          onSave={() => saveKey("openrouter")}
+          placeholder="sk-or-…"
+        />
         <p className="text-xs text-neutral-600">
           Keys are stored locally on this device. Environment variables
           OPENAI_API_KEY / ANTHROPIC_API_KEY take precedence when set.
@@ -280,6 +326,7 @@ export default function Settings({
             <option value="auto">Auto-detect</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Claude</option>
+            <option value="openrouter">OpenRouter</option>
           </select>
           <input
             value={model}
@@ -289,7 +336,9 @@ export default function Settings({
                 ? "claude-3-5-haiku-latest (default)"
                 : provider === "openai"
                   ? "gpt-4o-mini (default)"
-                  : "Model override (optional)"
+                  : provider === "openrouter"
+                    ? "anthropic/claude-3.5-haiku (default)"
+                    : "Model override (optional)"
             }
             className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
           />
