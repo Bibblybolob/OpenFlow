@@ -1,5 +1,20 @@
 import { useEffect, useState } from "react";
+import { emit } from "@tauri-apps/api/event";
 import { api } from "../../lib/ipc";
+import {
+  ACCENTS,
+  DEFAULT_PILL_STYLE,
+  PILL_STYLE_KEY,
+  accentOf,
+  loadPillStyle,
+  pillBackground,
+  pillRadius,
+  rgba,
+  shade,
+  type PillAccent,
+  type PillShape,
+  type PillStyle,
+} from "../../lib/pillStyle";
 
 type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter";
 
@@ -57,6 +72,7 @@ export default function Settings({
   const [savedAnthropic, setSavedAnthropic] = useState(false);
   const [savedOpenrouter, setSavedOpenrouter] = useState(false);
   const [flowbarPreset, setFlowbarPreset] = useState("bottom_center");
+  const [pillStyle, setPillStyle] = useState<PillStyle>(DEFAULT_PILL_STYLE);
   const [provider, setProvider] = useState<ProviderChoice>("auto");
   const [model, setModel] = useState("");
   const [language, setLanguage] = useState("auto");
@@ -82,6 +98,7 @@ export default function Settings({
     const hk = await api.getHotkey().catch(() => ["F5"]);
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
+    const style = await loadPillStyle();
 
     setSavedOpenai(Boolean(ok));
     setSavedAnthropic(Boolean(ak));
@@ -95,6 +112,7 @@ export default function Settings({
     setHotkey(hk.length ? hk : ["F5"]);
     setAutostart(as);
     setCommandMode(cm ?? true);
+    setPillStyle(style);
     setAccessibility(await invokeAccessibility());
   }
 
@@ -114,6 +132,17 @@ export default function Settings({
     setFlowbarPreset(preset);
     try {
       await api.setFlowbarPreset(preset);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function changePillStyle(patch: Partial<PillStyle>) {
+    const next = { ...pillStyle, ...patch };
+    setPillStyle(next);
+    try {
+      await api.setSetting(PILL_STYLE_KEY, next);
+      await emit("flowbar-style-changed");
     } catch (e) {
       console.error(e);
     }
@@ -274,6 +303,95 @@ export default function Settings({
           You can also grab the pill and drag it anywhere — its spot is
           remembered across restarts.
         </p>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
+          Pill appearance
+        </h2>
+        <div className="flex items-center justify-center rounded-xl border border-white/5 bg-white/[0.02] py-8">
+          <PillPreview style={pillStyle} />
+        </div>
+        <div className="rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+          <p className="mb-2 text-sm text-neutral-300">Shape</p>
+          <div className="flex gap-2">
+            {(
+              [
+                ["pill", "Pill"],
+                ["rounded", "Rounded"],
+                ["square", "Square"],
+              ] as [PillShape, string][]
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                onClick={() => changePillStyle({ shape: value })}
+                className={`flex-1 rounded-lg border px-3 py-2 text-xs transition ${
+                  pillStyle.shape === value
+                    ? "border-indigo-400/60 bg-indigo-500/15 text-white"
+                    : "border-white/10 text-neutral-400 hover:bg-white/5"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+          <p className="mb-2 text-sm text-neutral-300">Accent</p>
+          <div className="flex gap-2">
+            {(Object.keys(ACCENTS) as PillAccent[]).map((key) => (
+              <button
+                key={key}
+                title={ACCENTS[key].label}
+                onClick={() => changePillStyle({ accent: key })}
+                className={`h-7 w-7 rounded-full border-2 transition ${
+                  pillStyle.accent === key
+                    ? "scale-110 border-white"
+                    : "border-transparent hover:scale-105"
+                }`}
+                style={{ backgroundColor: ACCENTS[key].swatch }}
+              />
+            ))}
+          </div>
+        </div>
+        <div className="rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+          <div className="mb-2 flex items-center justify-between">
+            <p className="text-sm text-neutral-300">Opacity</p>
+            <span className="text-xs text-neutral-500">{pillStyle.opacity}%</span>
+          </div>
+          <input
+            type="range"
+            min={40}
+            max={100}
+            step={1}
+            value={pillStyle.opacity}
+            onChange={(e) =>
+              setPillStyle({ ...pillStyle, opacity: Number(e.target.value) })
+            }
+            onMouseUp={(e) =>
+              changePillStyle({ opacity: Number((e.target as HTMLInputElement).value) })
+            }
+            onTouchEnd={(e) =>
+              changePillStyle({ opacity: Number((e.target as HTMLInputElement).value) })
+            }
+            onKeyUp={(e) =>
+              changePillStyle({ opacity: Number((e.target as HTMLInputElement).value) })
+            }
+            className="w-full accent-indigo-400"
+          />
+        </div>
+        <ToggleRow
+          label="Animations"
+          hint="Pop-in motion, glow while recording, button feedback"
+          checked={pillStyle.animations}
+          onChange={() => changePillStyle({ animations: !pillStyle.animations })}
+        />
+        <ToggleRow
+          label="Hide when idle"
+          hint='The pill only appears while dictating; bring it back with the hotkey'
+          checked={pillStyle.autoHide}
+          onChange={() => changePillStyle({ autoHide: !pillStyle.autoHide })}
+        />
       </section>
 
       <section className="flex flex-col gap-3">
@@ -516,6 +634,45 @@ function PermRow({
           {ok ? "Granted" : "Check"}
         </span>
       )}
+    </div>
+  );
+}
+
+function PillPreview({ style }: { style: PillStyle }) {
+  const accent = accentOf(style);
+  const radius = pillRadius(style.shape);
+  return (
+    <div
+      className={`flex items-center gap-3 border px-4 py-2 shadow-2xl ${radius}`}
+      style={{
+        background: pillBackground("active", style.opacity),
+        borderColor: rgba(accent.border, 0.55),
+      }}
+    >
+      <span
+        className="flex h-9 w-9 items-center justify-center rounded-full text-white"
+        style={{
+          background: `linear-gradient(135deg, ${accent.base}, ${shade(accent.base, -0.4)})`,
+        }}
+      >
+        <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
+          <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v5.5A3.5 3.5 0 0 0 12 15Z" />
+          <path d="M18.5 11.5a.75.75 0 0 0-1.5 0 5 5 0 0 1-10 0 .75.75 0 0 0-1.5 0 6.5 6.5 0 0 0 5.75 6.46V21h-2.25a.75.75 0 0 0 0 1.5h6a.75.75 0 0 0 0-1.5H12.75v-3.04a6.5 6.5 0 0 0 5.75-6.46Z" />
+        </svg>
+      </span>
+      <div className="flex h-8 w-24 items-center justify-center gap-1">
+        {[40, 65, 100, 78, 52].map((h, i) => (
+          <span
+            key={i}
+            className="w-1 rounded-full"
+            style={{ height: `${h}%`, backgroundColor: accent.soft }}
+          />
+        ))}
+      </div>
+      <span
+        className="h-2 w-2 rounded-full"
+        style={{ backgroundColor: rgba(accent.base, 0.85) }}
+      />
     </div>
   );
 }

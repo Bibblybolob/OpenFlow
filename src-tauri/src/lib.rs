@@ -29,12 +29,22 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
 
 const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
 
+fn flowbar_auto_hide(db: &Store) -> bool {
+    db.get_setting("flowBarStyle")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<Value>(&v).ok())
+        .and_then(|v| v.get("autoHide").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
 fn create_flowbar(app: &tauri::AppHandle, db: &Store) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::{PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
     let saved: Option<(f64, f64)> = db
         .get_setting("flowBarPos")?
         .and_then(|v| serde_json::from_str(&v).ok());
+    let start_visible = !flowbar_auto_hide(db);
 
     let window = WebviewWindowBuilder::new(app, "flowbar", WebviewUrl::App("/#/flowbar".into()))
         .title("FlowBar")
@@ -47,7 +57,7 @@ fn create_flowbar(app: &tauri::AppHandle, db: &Store) -> Result<(), Box<dyn std:
         .shadow(false)
         .focused(false)
         .focusable(false)
-        .visible(true)
+        .visible(start_visible)
         .build()?;
 
     if let Some((x, y)) = saved {

@@ -84,6 +84,8 @@ export const api = {
 
   cancelRecording: () => invoke<void>("cancel_recording"),
 
+  pipelineStatus: () => invoke<string>("pipeline_status"),
+
   getHotkey: () => invoke<string[]>("get_hotkey"),
 
   setHotkey: (names: string[]) => invoke<string[]>("set_hotkey", { names }),
