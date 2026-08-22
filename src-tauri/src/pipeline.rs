@@ -9,9 +9,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::audio::AudioEngine;
 use crate::cloud::{llm, stt};
-use crate::hotkey::{
-    HotkeyEvent, HotkeyWatcher, PushToTalkWatcher, SharedHotkeyConfig,
-};
+use crate::hotkey::{HotkeyEvent, HotkeyWatcher, PushToTalkWatcher, SharedHotkeyConfig};
 use crate::inject;
 use crate::store::{Store, Transcript};
 
@@ -96,7 +94,8 @@ impl Pipeline {
 
         {
             let state = Arc::clone(&state);
-            std::thread::spawn(move || handler_loop(app, db, rx, state));
+            let timer_tx = tx.clone();
+            std::thread::spawn(move || handler_loop(app, db, rx, state, timer_tx));
         }
 
         Self {
@@ -168,9 +167,25 @@ fn fail(app: &AppHandle, state: &AtomicU8, message: String) {
     );
 }
 
-fn handler_loop(app: AppHandle, db: Arc<Store>, rx: mpsc::Receiver<Msg>, state: Arc<AtomicU8>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Idle,
+    Ptt,
+    HandsFree,
+}
+
+fn handler_loop(
+    app: AppHandle,
+    db: Arc<Store>,
+    rx: mpsc::Receiver<Msg>,
+    state: Arc<AtomicU8>,
+    timer_tx: mpsc::Sender<Msg>,
+) {
     let mut audio = AudioEngine::new();
     let mut current_app = String::new();
+    let mut mode = Mode::Idle;
+    let mut pending_tap = false;
+    let mut first_tap_at: Option<Instant> = None;
     {
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -189,48 +204,88 @@ fn handler_loop(app: AppHandle, db: Arc<Store>, rx: mpsc::Receiver<Msg>, state: 
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Hotkey(HotkeyEvent::Down) => {
-                current_app = inject::frontmost_app();
-                if audio.start().is_err() {
-                    continue;
+                if mode == Mode::Idle {
+                    current_app = inject::frontmost_app();
+                    if audio.start().is_err() {
+                        continue;
+                    }
+                    mode = Mode::Ptt;
+                    pending_tap = false;
+                    spawn_max_session_timer(&timer_tx);
+                    set_state(&state, PipelineState::Recording);
+                    emit(
+                        &app,
+                        PipelineEvent {
+                            state: PipelineState::Recording,
+                            error: None,
+                            transcript: None,
+                        },
+                    );
                 }
-                set_state(&state, PipelineState::Recording);
-                emit(
-                    &app,
-                    PipelineEvent {
-                        state: PipelineState::Recording,
-                        error: None,
-                        transcript: None,
-                    },
-                );
+                // Down while Ptt (second press of entering double-tap) or
+                // HandsFree (exit press): keep recording; release decides.
             }
             Msg::Hotkey(HotkeyEvent::Up) => {
-                let wav_path = temp_wav_path();
-                match audio.stop(&wav_path) {
-                    Ok(Some(duration_ms)) => run_session(
+                if mode != Mode::Idle {
+                    finish_session(&app, &db, &state, &mut audio, &mut current_app);
+                    mode = Mode::Idle;
+                    pending_tap = false;
+                    first_tap_at = None;
+                } else {
+                    set_state(&state, PipelineState::Idle);
+                    emit(
                         &app,
-                        &db,
-                        &state,
-                        &wav_path,
-                        duration_ms,
-                        std::mem::take(&mut current_app),
-                    ),
-                    Ok(None) => {
-                        let _ = std::fs::remove_file(&wav_path);
-                        set_state(&state, PipelineState::Idle);
-                        emit(
-                            &app,
-                            PipelineEvent {
-                                state: PipelineState::Idle,
-                                error: None,
-                                transcript: None,
-                            },
-                        );
-                    }
-                    Err(e) => fail(&app, &state, e.to_string()),
+                        PipelineEvent {
+                            state: PipelineState::Idle,
+                            error: None,
+                            transcript: None,
+                        },
+                    );
                 }
             }
+            Msg::Hotkey(HotkeyEvent::TapUp) => match mode {
+                Mode::Ptt => {
+                    let confirmed_double = pending_tap
+                        && first_tap_at
+                            .map(|t| t.elapsed() < Duration::from_millis(DOUBLE_TAP_WINDOW_MS))
+                            .unwrap_or(false);
+                    if !pending_tap {
+                        // First quick tap: hold judgement, keep recording.
+                        pending_tap = true;
+                        first_tap_at = Some(Instant::now());
+                    } else if confirmed_double {
+                        // Double-tap confirmed: restart capture cleanly and
+                        // go hands-free.
+                        audio.discard();
+                        current_app = inject::frontmost_app();
+                        if audio.start().is_ok() {
+                            mode = Mode::HandsFree;
+                            pending_tap = false;
+                            spawn_max_session_timer(&timer_tx);
+                        } else {
+                            fail(&app, &state, "microphone unavailable".to_string());
+                            mode = Mode::Idle;
+                        }
+                    } else {
+                        // Slow second tap — treat as hands-free entry too
+                        // but without resetting the buffer.
+                        mode = Mode::HandsFree;
+                        pending_tap = false;
+                    }
+                }
+                Mode::HandsFree => {
+                    finish_session(&app, &db, &state, &mut audio, &mut current_app);
+                    mode = Mode::Idle;
+                    pending_tap = false;
+                    first_tap_at = None;
+                }
+                Mode::Idle => {}
+            },
             Msg::Cancel => {
                 audio.discard();
+                mode = Mode::Idle;
+                pending_tap = false;
+                first_tap_at = None;
                 set_state(&state, PipelineState::Idle);
                 emit(
                     &app,
@@ -242,6 +297,47 @@ fn handler_loop(app: AppHandle, db: Arc<Store>, rx: mpsc::Receiver<Msg>, state: 
                 );
             }
         }
+    }
+}
+
+fn spawn_max_session_timer(tx: &mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(MAX_SESSION_SECS));
+        let _ = tx.send(Msg::Hotkey(HotkeyEvent::Up));
+    });
+}
+
+fn finish_session(
+    app: &AppHandle,
+    db: &Arc<Store>,
+    state: &Arc<AtomicU8>,
+    audio: &mut AudioEngine,
+    current_app: &mut String,
+) {
+    let wav_path = temp_wav_path();
+    match audio.stop(&wav_path) {
+        Ok(Some(duration_ms)) => run_session(
+            app,
+            db,
+            state,
+            &wav_path,
+            duration_ms,
+            std::mem::take(current_app),
+        ),
+        Ok(None) => {
+            let _ = std::fs::remove_file(&wav_path);
+            set_state(state, PipelineState::Idle);
+            emit(
+                app,
+                PipelineEvent {
+                    state: PipelineState::Idle,
+                    error: None,
+                    transcript: None,
+                },
+            );
+        }
+        Err(e) => fail(app, state, e.to_string()),
     }
 }
 

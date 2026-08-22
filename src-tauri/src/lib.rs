@@ -6,17 +6,20 @@ mod pipeline;
 mod store;
 
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 use tauri::Manager;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 
+use hotkey::{key_name, parse_key, HotkeyConfig, SharedHotkeyConfig};
 use pipeline::Pipeline;
 use store::Store;
 
 pub struct AppState {
-    pub db: Arc<Store>,
-    pub pipeline: Pipeline,
+    db: Arc<Store>,
+    pipeline: Pipeline,
+    hotkey: SharedHotkeyConfig,
 }
 
 fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
@@ -219,6 +222,73 @@ fn cancel_recording(state: tauri::State<AppState>) {
 }
 
 #[tauri::command]
+fn get_hotkey(state: tauri::State<AppState>) -> Vec<String> {
+    let cfg = state.hotkey.read().unwrap();
+    cfg.keys
+        .iter()
+        .map(|k| key_name(*k).unwrap_or("Unknown").to_string())
+        .collect()
+}
+
+#[tauri::command]
+fn set_hotkey(state: tauri::State<AppState>, names: Vec<String>) -> store::Result<Vec<String>> {
+    if names.is_empty() {
+        return Err(store::StoreError::Other(
+            "hotkey needs at least one key".to_string(),
+        ));
+    }
+    let mut keys = Vec::with_capacity(names.len());
+    for n in &names {
+        match parse_key(n) {
+            Some(k) => keys.push(k),
+            None => return Err(store::StoreError::Other(format!("unsupported key: {n}"))),
+        }
+    }
+    with_db(&state, |db| {
+        db.set_setting("hotkeyKeys", &serde_json::json!(names))
+    })?;
+    *state.hotkey.write().unwrap() = HotkeyConfig {
+        keys,
+        ..HotkeyConfig::default()
+    };
+    Ok(names)
+}
+
+#[tauri::command]
+fn autostart_status(app: tauri::AppHandle) -> store::Result<bool> {
+    app.autolaunch()
+        .is_enabled()
+        .map_err(|e| store::StoreError::Other(e.to_string()))
+}
+
+#[tauri::command]
+fn autostart_set(app: tauri::AppHandle, enable: bool) -> store::Result<()> {
+    let autolaunch = app.autolaunch();
+    let result = if enable {
+        autolaunch.enable()
+    } else {
+        autolaunch.disable()
+    };
+    result.map_err(|e| store::StoreError::Other(e.to_string()))
+}
+
+fn load_hotkey_config(db: &Store) -> SharedHotkeyConfig {
+    let mut config = HotkeyConfig::default();
+    if let Some(names) = db
+        .get_setting("hotkeyKeys")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
+    {
+        let keys: Vec<_> = names.iter().filter_map(|n| parse_key(n)).collect();
+        if !keys.is_empty() {
+            config.keys = keys;
+        }
+    }
+    Arc::new(RwLock::new(config))
+}
+
+#[tauri::command]
 fn accessibility_status() -> bool {
     inject::is_accessibility_trusted()
 }
@@ -238,13 +308,23 @@ fn open_accessibility_settings(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let db = Arc::new(Store::open(&dir.join("flowclone.db"))?);
+            let hotkey = load_hotkey_config(&db);
             create_flowbar(app.handle(), &db)?;
-            let pipeline = Pipeline::start(app.handle().clone(), Arc::clone(&db));
-            app.manage(AppState { db, pipeline });
+            let pipeline =
+                Pipeline::start(app.handle().clone(), Arc::clone(&db), Arc::clone(&hotkey));
+            app.manage(AppState {
+                db,
+                pipeline,
+                hotkey,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -271,6 +351,10 @@ pub fn run() {
             pipeline_status,
             toggle_recording,
             cancel_recording,
+            get_hotkey,
+            set_hotkey,
+            autostart_status,
+            autostart_set,
             accessibility_status,
             open_accessibility_settings
         ])

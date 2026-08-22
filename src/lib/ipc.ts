@@ -83,4 +83,13 @@ export const api = {
   toggleRecording: () => invoke<string>("toggle_recording"),
 
   cancelRecording: () => invoke<void>("cancel_recording"),
+
+  getHotkey: () => invoke<string[]>("get_hotkey"),
+
+  setHotkey: (names: string[]) => invoke<string[]>("set_hotkey", { names }),
+
+  autostartStatus: () => invoke<boolean>("autostart_status"),
+
+  setAutostart: (enable: boolean) =>
+    invoke<void>("autostart_set", { enable }),
 };

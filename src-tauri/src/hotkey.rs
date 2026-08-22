@@ -42,10 +42,7 @@ pub fn parse_key(name: &str) -> Option<Keycode> {
 }
 
 pub fn key_name(code: Keycode) -> Option<&'static str> {
-    KEY_TABLE
-        .iter()
-        .find(|(_, k)| *k == code)
-        .map(|(n, _)| *n)
+    KEY_TABLE.iter().find(|(_, k)| *k == code).map(|(n, _)| *n)
 }
 
 #[derive(Debug, Clone)]
@@ -90,15 +87,14 @@ impl Default for PushToTalkWatcher {
 impl HotkeyWatcher for PushToTalkWatcher {
     fn spawn(self, tx: Sender<HotkeyEvent>) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            let device = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                DeviceState::new,
-            )) {
-                Ok(d) => d,
-                Err(_) => {
-                    eprintln!("hotkey watcher unavailable: missing accessibility permission");
-                    return;
-                }
-            };
+            let device =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(DeviceState::new)) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        eprintln!("hotkey watcher unavailable: missing accessibility permission");
+                        return;
+                    }
+                };
             let mut held = false;
             let mut held_since = Instant::now();
             loop {
@@ -114,9 +110,9 @@ impl HotkeyWatcher for PushToTalkWatcher {
                         held_since = Instant::now();
                     }
                     (false, true) => {
-                        let event = if held_since.elapsed().as_millis() as u64
-                            < self.config.read().unwrap().tap_ms
-                        {
+                        let hold_ms = held_since.elapsed().as_millis() as u64;
+                        let tap_threshold = self.config.read().unwrap().tap_ms;
+                        let event = if hold_ms < tap_threshold {
                             HotkeyEvent::TapUp
                         } else {
                             HotkeyEvent::Up
@@ -131,5 +127,24 @@ impl HotkeyWatcher for PushToTalkWatcher {
                 thread::sleep(Duration::from_millis(self.poll_interval_ms));
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_table_roundtrip() {
+        for (name, code) in KEY_TABLE {
+            assert_eq!(parse_key(name), Some(*code));
+            assert_eq!(key_name(*code), Some(*name));
+        }
+    }
+
+    #[test]
+    fn parse_unknown_returns_none() {
+        assert_eq!(parse_key("Nonsense"), None);
+        assert_eq!(parse_key(""), None);
     }
 }

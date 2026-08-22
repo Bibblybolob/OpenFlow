@@ -3,9 +3,46 @@ import { api } from "../../lib/ipc";
 
 type ProviderChoice = "auto" | "openai" | "anthropic";
 
-const DEFAULTS: { key: string; label: string; value: string }[] = [
-  { key: "pushToTalk", label: "Push to talk", value: "Hold F5" },
-  { key: "cancel", label: "Cancel dictation", value: "Esc" },
+const LANGUAGES: { code: string; label: string }[] = [
+  { code: "auto", label: "Auto-detect" },
+  { code: "en", label: "English" },
+  { code: "es", label: "Español" },
+  { code: "fr", label: "Français" },
+  { code: "de", label: "Deutsch" },
+  { code: "pt", label: "Português" },
+  { code: "it", label: "Italiano" },
+  { code: "nl", label: "Nederlands" },
+  { code: "pl", label: "Polski" },
+  { code: "tr", label: "Türkçe" },
+  { code: "ru", label: "Русский" },
+  { code: "uk", label: "Українська" },
+  { code: "ar", label: "العربية" },
+  { code: "hi", label: "हिन्दी" },
+  { code: "zh", label: "中文" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "vi", label: "Tiếng Việt" },
+  { code: "th", label: "ไทย" },
+];
+
+const HOTKEY_CHOICES = [
+  "F1",
+  "F2",
+  "F3",
+  "F4",
+  "F5",
+  "F6",
+  "F7",
+  "F8",
+  "F9",
+  "F10",
+  "F11",
+  "F12",
+  "CapsLock",
+  "Right Shift",
+  "Right Ctrl",
+  "Right Alt",
+  "Right Cmd",
 ];
 
 export default function Settings() {
@@ -15,6 +52,9 @@ export default function Settings() {
   const [savedAnthropic, setSavedAnthropic] = useState(false);
   const [provider, setProvider] = useState<ProviderChoice>("auto");
   const [model, setModel] = useState("");
+  const [language, setLanguage] = useState("auto");
+  const [hotkey, setHotkey] = useState<string[]>(["F5"]);
+  const [autostart, setAutostart] = useState(false);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -28,6 +68,9 @@ export default function Settings() {
     const prov =
       ((await api.getSetting<string>("llmProvider")) as ProviderChoice) ?? "auto";
     const mdl = await api.getSetting<string>("llmModel");
+    const lang = (await api.getSetting<string>("language")) ?? "auto";
+    const hk = await api.getHotkey().catch(() => ["F5"]);
+    const as = await api.autostartStatus().catch(() => false);
 
     setSavedOpenai(Boolean(ok));
     setSavedAnthropic(Boolean(ak));
@@ -35,6 +78,9 @@ export default function Settings() {
     setAnthropicKey(maskKey(ak));
     setProvider(prov ?? "auto");
     setModel(mdl ?? "");
+    setLanguage(lang ?? "auto");
+    setHotkey(hk.length ? hk : ["F5"]);
+    setAutostart(as);
     setAccessibility(await invokeAccessibility());
   }
 
@@ -52,12 +98,35 @@ export default function Settings() {
   }
 
   async function saveCleanup() {
-    await api.setSetting(
-      "llmProvider",
-      provider === "auto" ? "auto" : provider,
-    );
+    await api.setSetting("llmProvider", provider);
     await api.setSetting("llmModel", model.trim() || "");
     refresh();
+  }
+
+  async function changeHotkey(name: string) {
+    setHotkey([name]);
+    try {
+      const applied = await api.setHotkey([name]);
+      setHotkey(applied);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function changeLanguage(code: string) {
+    setLanguage(code);
+    await api.setSetting("language", code === "auto" ? "" : code);
+  }
+
+  async function toggleAutostart() {
+    const next = !autostart;
+    setAutostart(next);
+    try {
+      await api.setAutostart(next);
+    } catch (e) {
+      console.error(e);
+      setAutostart(!next);
+    }
   }
 
   return (
@@ -68,6 +137,36 @@ export default function Settings() {
           Transcription, cleanup LLM, permissions, and shortcuts.
         </p>
       </div>
+
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
+          Dictation
+        </h2>
+        <div className="flex gap-2">
+          <SelectRow
+            label="Hotkey"
+            value={hotkey.join(" + ")}
+            options={HOTKEY_CHOICES.map((k) => ({ value: k, label: k }))}
+            onChange={(v) => changeHotkey(v)}
+          />
+          <SelectRow
+            label="Language"
+            value={language || "auto"}
+            options={LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
+            onChange={changeLanguage}
+          />
+        </div>
+        <ToggleRow
+          label="Launch at login"
+          hint="Start FlowClone automatically when you sign in"
+          checked={autostart}
+          onChange={toggleAutostart}
+        />
+        <p className="text-xs text-neutral-600">
+          Hold the hotkey to dictate. Quick double-tap switches to hands-free
+          mode; tap again or press Esc to stop.
+        </p>
+      </section>
 
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
@@ -130,10 +229,6 @@ export default function Settings() {
             Save
           </button>
         </div>
-        <p className="text-xs text-neutral-600">
-          Auto-detect prefers OpenAI when both keys exist. If cleanup fails,
-          your raw dictation is pasted anyway so nothing is ever lost.
-        </p>
       </section>
 
       <section className="flex flex-col gap-2">
@@ -163,25 +258,70 @@ export default function Settings() {
           />
         </div>
       </section>
+    </div>
+  );
+}
 
-      <section className="flex flex-col gap-2">
-        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
-          Shortcuts
-        </h2>
-        <div className="overflow-hidden rounded-xl border border-white/5">
-          {DEFAULTS.map((d) => (
-            <div
-              key={d.key}
-              className="flex items-center justify-between bg-white/[0.03] px-4 py-3 not-last:border-b not-last:border-white/5"
-            >
-              <span className="text-sm text-neutral-300">{d.label}</span>
-              <span className="rounded-md border border-white/10 bg-white/[0.05] px-2 py-0.5 text-xs text-neutral-400">
-                {d.value}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
+function SelectRow({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="flex flex-1 items-center gap-3 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-2.5">
+      <span className="w-16 shrink-0 text-xs text-neutral-500">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="min-w-0 flex-1 bg-transparent text-sm text-neutral-200 outline-none [&>option]:bg-[#1a1a20]"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function ToggleRow({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+      <div>
+        <p className="text-sm text-neutral-300">{label}</p>
+        <p className="text-[11px] text-neutral-600">{hint}</p>
+      </div>
+      <button
+        role="switch"
+        aria-checked={checked}
+        onClick={onChange}
+        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+          checked ? "bg-indigo-500" : "bg-white/10"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all ${
+            checked ? "left-[22px]" : "left-0.5"
+          }`}
+        />
+      </button>
     </div>
   );
 }
@@ -203,6 +343,7 @@ function KeyRow({
   onSave: () => void;
   placeholder: string;
 }) {
+  const dirty = Boolean(value) && !value.includes("•");
   return (
     <div className="flex items-center gap-3">
       <div className="w-40 shrink-0">
@@ -216,11 +357,11 @@ function KeyRow({
         placeholder={placeholder}
         className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
       />
-      {saved && !value.includes("•") && null}
       <button
         onClick={onSave}
+        disabled={!dirty}
         className={`shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition ${
-          value && !value.includes("•")
+          dirty
             ? "bg-indigo-500/90 text-white hover:bg-indigo-500"
             : "border border-white/10 text-neutral-500"
         }`}
