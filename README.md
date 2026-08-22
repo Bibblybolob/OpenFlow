@@ -1,12 +1,9 @@
-<<<<<<< HEAD
+# HEAD
 # OpenFlow
 # VIBE-CODED
 Push-to-talk dictation for macOS. Hold a hotkey, speak, release — your words are transcribed in the cloud, cleaned up by an LLM, and pasted at your cursor. Built with Tauri 2, React and TypeScript.
 =======
-# OpenFlow
-# VIBE-CODED
-
-Cross-platform voice dictation, inspired by [Wispr Flow](https://wisprflow.ai). Hold a hotkey, speak naturally, and polished text lands at your cursor in any app — with filler words removed, punctuation fixed, and self-corrections resolved.
+Cross-platform voice dictation. Hold a hotkey, speak naturally, and polished text lands at your cursor in any app — with filler words removed, punctuation fixed, and self-corrections resolved.
 
 Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and Windows**.
 >>>>>>> 1b4e83e (Add voice commands, error auto-dismiss, and README (Milestone 6))
