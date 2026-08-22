@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capability for the Hub and Flow Bar windows",
   "windows": ["hub", "flowbar"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": ["core:default", "opener:default", "updater:default"]
 }

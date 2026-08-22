@@ -81,11 +81,19 @@ Then hold `F5` anywhere and talk.
 - **macOS** — requires Accessibility permission (global hotkey, paste injection, frontmost-app detection) and Microphone permission. Paste is performed by staging the clipboard and synthesizing Cmd+V via System Events; the clipboard is restored ~800 ms later.
 - **Windows** — no permission prompts needed. Paste uses SendInput to synthesize Ctrl+V with the same clipboard save/restore dance. Known limitation: injection cannot reach apps running elevated (as administrator) unless FlowClone is elevated too. Frontmost-app detection returns the process name (e.g. `chrome`), which per-app styles match against.
 
-### Production build
+### Production build & releases
 
 ```bash
-npm run tauri build
+npm run tauri build          # local bundle (NSIS/MSI on Windows, .app on macOS)
 ```
+
+Releases are automated: push a tag (`git tag v0.1.0 && git push origin v0.1.0`) and CI builds signed bundles for macOS (Apple Silicon + Intel) and Windows via `tauri-action`, publishing them to a draft GitHub Release along with `latest.json` — the manifest the in-app updater polls.
+
+One-time setup for that pipeline:
+
+1. **Updater keypair**: `npm run tauri signer generate -w ~/.tauri/openflow.key`. Put the **public** key into `src-tauri/tauri.conf.json → plugins.updater.pubkey`, and the private key + password into repo secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+2. **macOS signing/notarization** (optional for personal use): set `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` repo secrets. Unsigned mac builds still run locally; notarized ones install cleanly on other machines.
+3. In-app updates land in **Settings → Check for updates**.
 
 ## Testing
 
@@ -109,7 +117,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and frontend builds on 
 | 6 | Voice commands, error auto-dismiss polish | ✅ |
 | 7 | Windows port (SendInput injection, frontmost app) | ✅ |
 | 8 | Onboarding wizard + permission gates | ✅ |
-| 9 | Signing/notarization, packaging, auto-update | ⏳ |
+| 9 | Packaging, updater, signing pipeline | ✅ |
 
 ## License
 

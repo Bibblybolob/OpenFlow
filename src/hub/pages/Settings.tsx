@@ -61,6 +61,7 @@ export default function Settings({
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
 
   useEffect(() => {
     refresh();
@@ -147,6 +148,23 @@ export default function Settings({
     }
   }
 
+  async function checkForUpdate() {
+    setUpdateStatus("Checking…");
+    try {
+      const version = await api.checkForUpdate();
+      if (version) {
+        setUpdateStatus(`Version ${version} available — installing…`);
+        await api.installUpdate();
+        setUpdateStatus("Installed. Restarting…");
+      } else {
+        setUpdateStatus("You're up to date.");
+      }
+    } catch (e) {
+      console.error(e);
+      setUpdateStatus(String(e).replace(/^.*failed: /, "Check failed: "));
+    }
+  }
+
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
       <div>
@@ -162,6 +180,28 @@ export default function Settings({
       >
         Run setup wizard again
       </button>
+
+      <section className="flex flex-col gap-2">
+        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
+          About
+        </h2>
+        <div className="flex items-center justify-between rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+          <span className="text-sm text-neutral-300">
+            Version {import.meta.env.PACKAGE_VERSION ?? "0.1.0"}
+          </span>
+          <div className="flex items-center gap-3">
+            {updateStatus && (
+              <span className="text-xs text-neutral-500">{updateStatus}</span>
+            )}
+            <button
+              onClick={checkForUpdate}
+              className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 transition hover:bg-white/5"
+            >
+              Check for updates
+            </button>
+          </div>
+        </div>
+      </section>
 
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">

@@ -296,6 +296,38 @@ fn set_flowbar_visible(app: tauri::AppHandle, visible: bool) -> Result<(), Strin
     }
 }
 
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|e| format!("updater unavailable: {e}"))?
+        .check()
+        .await
+        .map_err(|e| format!("update check failed: {e}"))?;
+    Ok(update.map(|u| u.version))
+}
+
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app
+        .updater()
+        .map_err(|e| format!("updater unavailable: {e}"))?;
+    if let Some(update) = updater
+        .check()
+        .await
+        .map_err(|e| format!("update check failed: {e}"))?
+    {
+        update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|e| format!("update install failed: {e}"))?;
+        app.restart();
+    }
+    Ok(())
+}
+
 fn load_hotkey_config(db: &Store) -> SharedHotkeyConfig {
     let mut config = HotkeyConfig::default();
     if let Some(names) = db
@@ -336,6 +368,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
@@ -381,6 +414,8 @@ pub fn run() {
             autostart_set,
             check_mic_permission,
             set_flowbar_visible,
+            check_for_update,
+            install_update,
             accessibility_status,
             open_accessibility_settings
         ])
