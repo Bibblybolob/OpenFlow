@@ -68,6 +68,12 @@ export default function FlowBar() {
 
   const recording = state === "recording";
 
+  useEffect(() => {
+    if (!hasError) return;
+    const timer = setTimeout(() => setHasError(false), 6000);
+    return () => clearTimeout(timer);
+  }, [hasError]);
+
   return (
     <div
       data-tauri-drag-region

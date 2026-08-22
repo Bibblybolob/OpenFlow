@@ -55,6 +55,7 @@ export default function Settings() {
   const [language, setLanguage] = useState("auto");
   const [hotkey, setHotkey] = useState<string[]>(["F5"]);
   const [autostart, setAutostart] = useState(false);
+  const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -71,6 +72,7 @@ export default function Settings() {
     const lang = (await api.getSetting<string>("language")) ?? "auto";
     const hk = await api.getHotkey().catch(() => ["F5"]);
     const as = await api.autostartStatus().catch(() => false);
+    const cm = await api.getSetting<boolean>("commandMode");
 
     setSavedOpenai(Boolean(ok));
     setSavedAnthropic(Boolean(ak));
@@ -81,6 +83,7 @@ export default function Settings() {
     setLanguage(lang ?? "auto");
     setHotkey(hk.length ? hk : ["F5"]);
     setAutostart(as);
+    setCommandMode(cm ?? true);
     setAccessibility(await invokeAccessibility());
   }
 
@@ -129,6 +132,17 @@ export default function Settings() {
     }
   }
 
+  async function toggleCommandMode() {
+    const next = !commandMode;
+    setCommandMode(next);
+    try {
+      await api.setSetting("commandMode", next);
+    } catch (e) {
+      console.error(e);
+      setCommandMode(!next);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
       <div>
@@ -161,6 +175,12 @@ export default function Settings() {
           hint="Start FlowClone automatically when you sign in"
           checked={autostart}
           onChange={toggleAutostart}
+        />
+        <ToggleRow
+          label="Voice commands"
+          hint='Say things like "open youtube", "search rust async", or "copy …" to act instead of typing'
+          checked={commandMode}
+          onChange={toggleCommandMode}
         />
         <p className="text-xs text-neutral-600">
           Hold the hotkey to dictate. Quick double-tap switches to hands-free

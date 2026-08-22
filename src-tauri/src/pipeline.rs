@@ -407,7 +407,53 @@ fn run_session(
         }
     };
 
+    // Command mode: recognized spoken commands execute instead of pasting.
+    if crate::commands::is_enabled(db) {
+        if let Some(command) = crate::commands::parse(&polished) {
+            return run_command(app, db, state, &polished, &raw_text, &data, &command);
+        }
+    }
+
     finish(app, db, state, &polished, &raw_text, &data);
+}
+
+fn run_command(
+    app: &AppHandle,
+    db: &Arc<Store>,
+    state: &Arc<AtomicU8>,
+    polished: &str,
+    raw_text: &str,
+    data: &SessionData,
+    command: &crate::commands::Command,
+) {
+    match crate::commands::execute(app, command) {
+        Ok(()) => {
+            eprintln!("command executed: {}", crate::commands::describe(command));
+        }
+        Err(e) => {
+            emit_warning(app, format!("command failed — text pasted instead ({e})"));
+            return finish(app, db, state, polished, raw_text, data);
+        }
+    }
+
+    set_state(state, PipelineState::Idle);
+    match db.insert_transcript(
+        polished,
+        raw_text,
+        &data.language,
+        data.duration_ms,
+        "command",
+    ) {
+        Ok(transcript) => emit(
+            app,
+            PipelineEvent {
+                state: PipelineState::Idle,
+                error: None,
+                transcript: Some(transcript),
+            },
+        ),
+        Err(e) => fail(app, state, e.to_string()),
+    }
 }
 
 struct SessionData {

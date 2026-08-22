@@ -1,5 +1,6 @@
 mod audio;
 mod cloud;
+mod commands;
 mod hotkey;
 mod inject;
 mod pipeline;
