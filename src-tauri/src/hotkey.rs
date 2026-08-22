@@ -31,7 +31,7 @@ pub const KEY_TABLE: &[(&str, Keycode)] = &[
     ("Right Shift", Keycode::RShift),
     ("Right Ctrl", Keycode::RControl),
     ("Right Alt", Keycode::RAlt),
-    ("Right Cmd", Keycode::Command),
+    ("Right Cmd/Win", Keycode::Command),
 ];
 
 pub fn parse_key(name: &str) -> Option<Keycode> {

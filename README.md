@@ -42,7 +42,8 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and 
 │ cloud/stt.rs OpenAI transcription (gpt-4o-transcribe)            │
 │ cloud/llm.rs Cleanup pass — OpenAI Chat / Anthropic Messages     │
 │ commands.rs  Voice command parser + executor                     │
-│ inject/      Clipboard-paste via System Events (macOS), stub Win │
+│ inject/      Clipboard-paste: System Events (macOS), SendInput    │
+│              Ctrl+V (Windows)                                    │
 │ store.rs     SQLite: transcripts, dictionary, snippets, styles   │
 └───────────────────────────────────────────────────────────────────┘
 ```
@@ -74,6 +75,11 @@ First run:
 
 Then hold `F5` anywhere and talk.
 
+### Platform notes
+
+- **macOS** — requires Accessibility permission (global hotkey, paste injection, frontmost-app detection) and Microphone permission. Paste is performed by staging the clipboard and synthesizing Cmd+V via System Events; the clipboard is restored ~800 ms later.
+- **Windows** — no permission prompts needed. Paste uses SendInput to synthesize Ctrl+V with the same clipboard save/restore dance. Known limitation: injection cannot reach apps running elevated (as administrator) unless FlowClone is elevated too. Frontmost-app detection returns the process name (e.g. `chrome`), which per-app styles match against.
+
 ### Production build
 
 ```bash
@@ -100,7 +106,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and frontend builds on 
 | 4 | LLM cleanup (OpenAI + Claude), snippets, styles | ✅ |
 | 5 | Hands-free, hotkey customization, languages, autostart | ✅ |
 | 6 | Voice commands, error auto-dismiss polish | ✅ |
-| 7 | Windows port (injection, hotkeys, installer) | ⏳ |
+| 7 | Windows port (SendInput injection, frontmost app) | ✅ |
 | 8 | Onboarding wizard + permission gates | ⏳ |
 | 9 | Signing/notarization, packaging, auto-update | ⏳ |
 
