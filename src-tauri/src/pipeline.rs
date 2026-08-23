@@ -598,8 +598,11 @@ fn run_session(
 
     // LLM cleanup; fall back to the raw transcription on any failure so a
     // cleanup outage never costs the user their dictation. Skippable for
-    // minimum-latency raw paste via the cleanupEnabled setting.
-    let polished = if cleanup_enabled(db) {
+    // minimum-latency raw paste via the cleanupEnabled setting, and skipped
+    // automatically for short utterances (cleanupSkipShort) since raw STT is
+    // usually already clean there.
+    let short = raw_text.chars().count() < SHORT_UTTERANCE_CHARS;
+    let polished = if cleanup_enabled(db) && !(short && cleanup_skip_short(db)) {
         match llm::polish(db, &raw_text, &data.target_app) {
             Ok(text) => text,
             Err(e) => {
@@ -628,8 +631,21 @@ fn run_session(
     finish(app, db, state, &polished, &raw_text, &data, timings);
 }
 
+/// Utterances shorter than this skip LLM cleanup by default: short
+/// dictations rarely need rewriting, and skipping removes the single
+/// largest latency component from the release-to-paste path.
+const SHORT_UTTERANCE_CHARS: usize = 120;
+
 fn cleanup_enabled(db: &Store) -> bool {
     db.get_setting("cleanupEnabled")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<bool>(&v).ok())
+        .unwrap_or(true)
+}
+
+fn cleanup_skip_short(db: &Store) -> bool {
+    db.get_setting("cleanupSkipShort")
         .ok()
         .flatten()
         .and_then(|v| serde_json::from_str::<bool>(&v).ok())

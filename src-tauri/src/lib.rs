@@ -568,6 +568,17 @@ pub fn run() {
                 hotkey,
                 watcher_status,
             });
+            // Pay the DNS+TCP+TLS handshake for the transcription API now,
+            // in the background, so the first dictation doesn't. The pooled
+            // client keeps the connection warm afterwards.
+            std::thread::spawn(move || {
+                if let Ok(client) = cloud::http_client() {
+                    let _ = client
+                        .get("https://api.openai.com/v1/models")
+                        .timeout(std::time::Duration::from_secs(10))
+                        .send();
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

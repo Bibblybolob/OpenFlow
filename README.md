@@ -49,13 +49,15 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 
 1. Hotkey down → frontmost app captured for style matching, mic stream opens.
 2. Hotkey up → audio is resampled to 16 kHz mono and encoded as WAV in memory.
-3. Transcription: OpenAI STT, OpenRouter audio model, or on-device whisper.cpp
-   (dictionary terms injected as a bias prompt). HTTP connections stay warm
-   between sessions so no TLS handshake is paid per dictation.
+3. Transcription: OpenAI STT (gpt-4o-mini-transcribe by default — ~2x faster
+   than the full model at near-identical quality), OpenRouter audio model, or
+   on-device whisper.cpp (dictionary terms injected as a bias prompt).
+   Connections are pre-warmed at launch and stay warm between sessions, so no
+   TLS handshake is paid per dictation.
 4. Snippet fast-path: exact trigger match expands locally, no LLM call.
-5. LLM cleanup polishes the text (skippable via Settings → Cleanup → AI
-   cleanup; raw text is also the fallback if this fails — you never lose a
-   dictation).
+5. LLM cleanup polishes the text (skippable via Settings → Cleanup; short
+   utterances under ~120 chars skip it automatically via "Fast path", and raw
+   text is always the fallback if cleanup fails — you never lose a dictation).
 6. Command mode check: recognized commands execute instead of pasting.
 7. Text is staged on the clipboard, Cmd+V synthesized natively via CGEvent
    (macOS) or SendInput Ctrl+V (Windows) into the target app, clipboard

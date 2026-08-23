@@ -67,6 +67,7 @@ export default function Settings({
   const [localModel, setLocalModel] = useState("base");
   const [localDownload, setLocalDownload] = useState<string | null>(null);
   const [cleanupEnabled, setCleanupEnabled] = useState(true);
+  const [skipShort, setSkipShort] = useState(true);
   const [model, setModel] = useState("");
   const [language, setLanguage] = useState("auto");
   const [hotkey, setHotkey] = useState<string[]>(["Right Shift"]);
@@ -138,6 +139,7 @@ export default function Settings({
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
+    const ss = await api.getSetting<boolean>("cleanupSkipShort");
     const lm = await api.getSetting<string>("sttLocalModel");
     const lms = await api.localModelStatus().catch(() => [] as LocalModelInfo[]);
     const style = await loadPillStyle();
@@ -158,6 +160,7 @@ export default function Settings({
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
+    setSkipShort(ss ?? true);
     setLocalModel(lm ?? "base");
     setLocalModels(lms);
     setPillStyle(style);
@@ -249,6 +252,17 @@ export default function Settings({
     } catch (e) {
       console.error(e);
       setCleanupEnabled(!next);
+    }
+  }
+
+  async function toggleSkipShort() {
+    const next = !skipShort;
+    setSkipShort(next);
+    try {
+      await api.setSetting("cleanupSkipShort", next);
+    } catch (e) {
+      console.error(e);
+      setSkipShort(!next);
     }
   }
 
@@ -588,6 +602,12 @@ export default function Settings({
           hint="Removes fillers and fixes punctuation — turn off to paste raw transcription with minimum latency"
           checked={cleanupEnabled}
           onChange={toggleCleanupEnabled}
+        />
+        <ToggleRow
+          label="Fast path for short dictations"
+          hint="Paste raw text without LLM cleanup for utterances under ~120 characters — saves the biggest latency chunk"
+          checked={skipShort}
+          onChange={toggleSkipShort}
         />
         <div className={`flex gap-2 ${cleanupEnabled ? "" : "pointer-events-none opacity-40"}`}>
           <select

@@ -38,7 +38,10 @@ impl SttProvider {
     }
 }
 
-const DEFAULT_OPENAI_STT_MODEL: &str = "gpt-4o-transcribe";
+/// gpt-4o-mini-transcribe is ~2x faster than the full gpt-4o-transcribe at
+/// near-identical dictation quality, which dominates release-to-paste
+/// latency for cloud transcription.
+const DEFAULT_OPENAI_STT_MODEL: &str = "gpt-4o-mini-transcribe";
 const DEFAULT_OPENROUTER_STT_MODEL: &str = "thinkingmachines/inkling-small:free";
 
 pub fn transcribe(
