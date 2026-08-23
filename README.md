@@ -1,12 +1,8 @@
-# HEAD
 # OpenFlow
-# VIBE-CODED
-Push-to-talk dictation for macOS. Hold a hotkey, speak, release — your words are transcribed in the cloud, cleaned up by an LLM, and pasted at your cursor. Built with Tauri 2, React and TypeScript.
-=======
-Cross-platform voice dictation. Hold a hotkey, speak naturally, and polished text lands at your cursor in any app — with filler words removed, punctuation fixed, and self-corrections resolved.
 
-Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and Windows**.
->>>>>>> 1b4e83e (Add voice commands, error auto-dismiss, and README (Milestone 6))
+Push-to-talk voice dictation for macOS and Windows. Hold a hotkey, speak naturally, release — your words are transcribed in the cloud, cleaned up by an LLM (filler words removed, punctuation fixed, self-corrections resolved), and pasted at your cursor in any app.
+
+Built with **Tauri 2** (Rust core + React/TypeScript UI).
 
 ## Features
 
@@ -21,7 +17,8 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and 
 - **Flow Bar** — floating, focus-safe pill with live waveform, click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
 - **History & stats** — searchable transcript history grouped by day, word counts, streaks.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
-- **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers; applies live.
+- **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (macOS offers Right Option/Cmd; Windows/Linux add Right Ctrl/Alt/Win); applies live and migrates stale key names on upgrade.
+- **Reliable Flow Bar visibility** — the pill is shown natively by the Rust core on every state change (not just via webview events), its position is clamped to the visible monitor, and the webview reconciles against the pipeline state as a fallback — so dictation always has a visible indicator.
 - **Guided onboarding** — first-launch wizard walks through Accessibility + microphone permissions with live checks, then a real dictation test unlocks the app.
 - **Privacy-first storage** — everything local in SQLite; audio is transient; keys stay on-device.
 
@@ -37,7 +34,8 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI), targeting **macOS and 
 │ hotkey.rs    global push-to-talk watcher (tap vs hold detection) │
 │ audio.rs     cpal mic capture → 16-bit WAV + RMS level events    │
 │ pipeline.rs  FSM: idle → recording → transcribing → injecting    │
-│ cloud/stt.rs OpenAI transcription (gpt-4o-transcribe)            │
+│ cloud/stt.rs OpenAI transcription (gpt-4o-transcribe) or          │
+│              OpenRouter audio-input chat models                   │
 │ cloud/llm.rs Cleanup pass — OpenAI Chat / Anthropic Messages     │
 │ commands.rs  Voice command parser + executor                     │
 │ inject/      Clipboard-paste: System Events (macOS), SendInput    │
@@ -67,15 +65,18 @@ npm run tauri dev
 
 First run:
 
-1. Grant **Accessibility** permission when prompted (Settings → Privacy & Security → Accessibility) — required for global hotkeys, paste injection, and app detection.
-2. Grant **Microphone** access on first dictation.
-3. Add an API key in **Settings → API keys** (OpenAI for transcription; OpenAI or Claude for cleanup). Env vars `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` also work.
+1. Grant **Accessibility** permission when prompted (Settings → Privacy & Security → Accessibility) — required for paste injection and app detection.
+2. Grant **Input Monitoring** permission (Settings → Privacy & Security → Input Monitoring) — required for the global hotkey watcher. The Hub shows live status for both and can open the right pane.
+3. Grant **Microphone** access on first dictation.
+4. Add an API key in **Settings → API keys** (OpenAI for transcription; OpenAI, Claude, or OpenRouter for cleanup). Env vars `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` also work.
 
 Then hold `F5` anywhere and talk.
 
+> **Note:** replacing the app bundle (e.g., rebuilding or updating an ad-hoc-signed build) silently revokes Accessibility + Input Monitoring on macOS. If the hotkey stops working after an update, re-toggle both permissions.
+
 ### Platform notes
 
-- **macOS** — requires Accessibility permission (global hotkey, paste injection, frontmost-app detection) and Microphone permission. Paste is performed by staging the clipboard and synthesizing Cmd+V via System Events; the clipboard is restored ~800 ms later.
+- **macOS** — requires Accessibility permission (paste injection, frontmost-app detection), Input Monitoring permission (global hotkey), and Microphone permission. Paste is performed by staging the clipboard and synthesizing Cmd+V via System Events; the clipboard is restored ~800 ms later. Hotkey detection uses a polling watcher gated on both permissions; it starts automatically once they are granted.
 - **Windows** — no permission prompts needed. Paste uses SendInput to synthesize Ctrl+V with the same clipboard save/restore dance. Known limitation: injection cannot reach apps running elevated (as administrator) unless FlowClone is elevated too. Frontmost-app detection returns the process name (e.g. `chrome`), which per-app styles match against.
 
 ### Production build & releases
@@ -113,6 +114,14 @@ xattr -cr /Applications/FlowClone.app
 ```
 
 The app then launches normally. Long-term fix requires an Apple Developer certificate: add the six `APPLE_*` secrets (uncomment them in `.github/workflows/ci.yml`) and future releases will be signed and notarized.
+
+### macOS: hotkey does nothing after an update/rebuild
+
+Ad-hoc signatures change on every build, and macOS ties TCC permissions to the signature — so replacing the bundle revokes **Input Monitoring** (and Accessibility) silently. The dictation pipeline waits for both permissions before starting the hotkey watcher, so the symptom is "hotkey dead, no errors". Fix: System Settings → Privacy & Security → toggle FlowClone back on under **Input Monitoring** and **Accessibility**, then relaunch. The Hub's Settings page shows live status for both.
+
+### macOS: pill doesn't appear while recording
+
+The pill window is shown/hidden natively by the Rust core on every pipeline transition, its position is clamped into the visible monitor area on each show, and the webview additionally reconciles state via polling — a missed event or an off-screen saved position can no longer leave you recording blind. If it still misbehaves, check that `flowBarPos` in the app DB isn't pinned to a disconnected display.
 
 ### Windows: SmartScreen warning on first install
 

@@ -40,26 +40,6 @@ const LANGUAGES: { code: string; label: string }[] = [
   { code: "th", label: "ไทย" },
 ];
 
-const HOTKEY_CHOICES = [
-  "F1",
-  "F2",
-  "F3",
-  "F4",
-  "F5",
-  "F6",
-  "F7",
-  "F8",
-  "F9",
-  "F10",
-  "F11",
-  "F12",
-  "CapsLock",
-  "Right Shift",
-  "Right Ctrl",
-  "Right Alt",
-  "Right Cmd",
-];
-
 export default function Settings({
   onRerunSetup,
 }: {
@@ -74,12 +54,17 @@ export default function Settings({
   const [flowbarPreset, setFlowbarPreset] = useState("bottom_center");
   const [pillStyle, setPillStyle] = useState<PillStyle>(DEFAULT_PILL_STYLE);
   const [provider, setProvider] = useState<ProviderChoice>("auto");
+  const [sttProvider, setSttProvider] = useState<ProviderChoice>("openai");
   const [model, setModel] = useState("");
   const [language, setLanguage] = useState("auto");
   const [hotkey, setHotkey] = useState<string[]>(["F5"]);
+  const [hotkeyOptions, setHotkeyOptions] = useState<string[]>([
+    "F1", "F5", "CapsLock", "Right Shift",
+  ]);
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
+  const [inputMonitoring, setInputMonitoring] = useState<boolean | null>(null);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
 
   useEffect(() => {
@@ -93,9 +78,15 @@ export default function Settings({
     const orkey = await api.getSetting<string>("openrouterApiKey");
     const prov =
       ((await api.getSetting<string>("llmProvider")) as ProviderChoice) ?? "auto";
+    const sttProv =
+      ((await api.getSetting<string>("sttProvider")) as ProviderChoice) ??
+      "openai";
     const mdl = await api.getSetting<string>("llmModel");
     const lang = (await api.getSetting<string>("language")) ?? "auto";
     const hk = await api.getHotkey().catch(() => ["F5"]);
+    const hkOptions = await api
+      .hotkeyOptions()
+      .catch(() => ["F1", "F5", "CapsLock", "Right Shift"]);
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const style = await loadPillStyle();
@@ -107,13 +98,16 @@ export default function Settings({
     setAnthropicKey(maskKey(ak));
     setOpenrouterKey(maskKey(orkey));
     setProvider(prov ?? "auto");
+    setSttProvider(sttProv ?? "openai");
     setModel(mdl ?? "");
     setLanguage(lang ?? "auto");
     setHotkey(hk.length ? hk : ["F5"]);
+    setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "F5", "CapsLock", "Right Shift"]);
     setAutostart(as);
     setCommandMode(cm ?? true);
     setPillStyle(style);
     setAccessibility(await invokeAccessibility());
+    setInputMonitoring(await api.inputMonitoringStatus().catch(() => true));
   }
 
   async function saveKey(kind: "openai" | "anthropic" | "openrouter") {
@@ -161,6 +155,19 @@ export default function Settings({
       setHotkey(applied);
     } catch (e) {
       console.error(e);
+    }
+  }
+
+  async function changeSttProvider(choice: ProviderChoice) {
+    setSttProvider(choice);
+    try {
+      await api.setSetting("sttProvider", choice);
+      if (choice === "openrouter") {
+        await api.setSetting("sttModel", "");
+      }
+    } catch (e) {
+      console.error(e);
+      setSttProvider(choice === "openrouter" ? "openai" : "openrouter");
     }
   }
 
@@ -254,7 +261,7 @@ export default function Settings({
           <SelectRow
             label="Hotkey"
             value={hotkey.join(" + ")}
-            options={HOTKEY_CHOICES.map((k) => ({ value: k, label: k }))}
+            options={hotkeyOptions.map((k) => ({ value: k, label: k }))}
             onChange={(v) => changeHotkey(v)}
           />
           <SelectRow
@@ -280,6 +287,29 @@ export default function Settings({
           Hold the hotkey to dictate. Quick double-tap switches to hands-free
           mode; tap again or press Esc to stop.
         </p>
+      </section>
+
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
+          Transcription
+        </h2>
+        <div className="flex gap-2">
+          <select
+            value={sttProvider}
+            onChange={(e) =>
+              changeSttProvider(e.target.value as ProviderChoice)
+            }
+            className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm outline-none focus:border-indigo-400/60"
+          >
+            <option value="openai">OpenAI Whisper</option>
+            <option value="openrouter">OpenRouter (audio model)</option>
+          </select>
+          <p className="flex-1 self-center text-xs text-neutral-600">
+            {sttProvider === "openrouter"
+              ? "Sends audio to an OpenRouter chat model — works with your existing OpenRouter key."
+              : "Uses your OpenAI key (sk-…). An OpenRouter key here will be rejected."}
+          </p>
+        </div>
       </section>
 
       <section className="flex flex-col gap-2">
@@ -475,6 +505,25 @@ export default function Settings({
         </h2>
         <div className="overflow-hidden rounded-xl border border-white/5">
           <PermRow label="Microphone" ok={true} hint="Granted on first use" />
+          <PermRow
+            label="Input Monitoring (global hotkey)"
+            ok={inputMonitoring === true}
+            hint={
+              inputMonitoring === false
+                ? "Required to detect the hotkey in any app — without it no hotkey can fire"
+                : "Needed to read the hotkey while other apps are focused"
+            }
+            action={
+              inputMonitoring === false ? (
+                <button
+                  onClick={openInputMonitoringSettings}
+                  className="rounded-md bg-indigo-500/20 px-2 py-1 text-xs text-indigo-300 transition hover:bg-indigo-500/30"
+                >
+                  Open System Settings
+                </button>
+              ) : null
+            }
+          />
           <PermRow
             label="Accessibility (typing into apps)"
             ok={accessibility === true}
@@ -694,6 +743,14 @@ async function invokeAccessibility(): Promise<boolean> {
 async function openAccessibilitySettings() {
   try {
     await api.openAccessibilitySettings();
+  } catch {
+    // best effort only
+  }
+}
+
+async function openInputMonitoringSettings() {
+  try {
+    await api.openInputMonitoringSettings();
   } catch {
     // best effort only
   }

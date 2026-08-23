@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioEngine;
 use crate::cloud::{llm, stt};
@@ -74,14 +74,35 @@ impl Pipeline {
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
-        if inject::is_accessibility_trusted() {
-            PushToTalkWatcher {
-                config: hotkey_config,
-                poll_interval_ms: 20,
-            }
-            .spawn(hk_tx);
-        } else {
-            eprintln!("dictation disabled: grant Accessibility permission in System Settings");
+        {
+            // Permissions can be granted at any time (and are silently
+            // revoked when the app bundle is replaced), so poll until both
+            // gates open: Accessibility (paste) and Input Monitoring
+            // (reading global keystrokes for the hotkey).
+            let config = Arc::clone(&hotkey_config);
+            std::thread::spawn(move || {
+                let mut announced = false;
+                loop {
+                    if inject::is_accessibility_trusted()
+                        && inject::is_listen_event_trusted()
+                    {
+                        break;
+                    }
+                    if !announced {
+                        eprintln!(
+                            "dictation idle: waiting for Accessibility + Input Monitoring permission…"
+                        );
+                        announced = true;
+                    }
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                eprintln!("permissions granted — hotkey watcher starting");
+                PushToTalkWatcher {
+                    config,
+                    poll_interval_ms: 20,
+                }
+                .spawn(hk_tx);
+            });
         }
         let fwd_tx = tx.clone();
         std::thread::spawn(move || {
@@ -154,17 +175,85 @@ fn emit(app: &AppHandle, event: PipelineEvent) {
     let _ = app.emit("pipeline", event);
 }
 
-fn fail(app: &AppHandle, state: &AtomicU8, message: String) {
-    eprintln!("pipeline error: {message}");
-    set_state(state, PipelineState::Idle);
+/// Applies a pipeline state change: updates the FSM atom, drives Flow Bar
+/// window visibility natively (so a missed webview event can never leave the
+/// pill stuck hidden), and broadcasts the event to the webviews.
+fn transition(
+    app: &AppHandle,
+    db: &Store,
+    state: &Arc<AtomicU8>,
+    next: PipelineState,
+    error: Option<String>,
+    transcript: Option<Transcript>,
+) {
+    set_state(state, next);
+    sync_flowbar(app, db, state);
     emit(
         app,
         PipelineEvent {
-            state: PipelineState::Idle,
-            error: Some(message),
-            transcript: None,
+            state: next,
+            error,
+            transcript,
         },
     );
+}
+
+/// Shows the pill immediately whenever dictation is active; on idle, hides it
+/// after the webview's exit animation would have finished. The position is
+/// clamped into the current monitor so a saved spot from a disconnected
+/// display can't park the pill off-screen.
+fn sync_flowbar(app: &AppHandle, db: &Store, state: &Arc<AtomicU8>) {
+    let Some(window) = app.get_webview_window("flowbar") else {
+        return;
+    };
+    let next = match state.load(Ordering::Relaxed) {
+        1 => PipelineState::Recording,
+        2 => PipelineState::Transcribing,
+        3 => PipelineState::Injecting,
+        _ => PipelineState::Idle,
+    };
+    if !crate::flowbar_auto_hide(db) || next != PipelineState::Idle {
+        clamp_flowbar_position(&window);
+        let _ = window.show();
+        return;
+    }
+    let idle_state = Arc::clone(state);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(450));
+        // A new session may have started during the grace period.
+        if idle_state.load(Ordering::Relaxed) == PipelineState::Idle.as_u8() {
+            let _ = window.hide();
+        }
+    });
+}
+
+fn clamp_flowbar_position(window: &tauri::WebviewWindow) {
+    use tauri::PhysicalPosition;
+
+    let Ok(outer) = window.outer_position() else {
+        return;
+    };
+    let Some(monitor) = window.current_monitor().ok().flatten() else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    let bounds = monitor.size();
+    let bar_w = crate::FLOWBAR_SIZE.0 * scale;
+    let bar_h = crate::FLOWBAR_SIZE.1 * scale;
+    // A small margin keeps a sliver of the pill grabbable at the edges.
+    let margin = 8.0 * scale;
+    let max_x = (bounds.width as f64 - bar_w - margin).max(0.0);
+    let max_y = (bounds.height as f64 - bar_h - margin).max(0.0);
+    let x = (outer.x as f64).clamp(margin, max_x.max(margin));
+    let y = (outer.y as f64).clamp(margin, max_y.max(margin));
+    if (x - outer.x as f64).abs() > 1.0 || (y - outer.y as f64).abs() > 1.0 {
+        let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+    }
+}
+
+fn fail(app: &AppHandle, db: &Store, state: &Arc<AtomicU8>, message: String) {
+    eprintln!("pipeline error: {message}");
+    transition(app, db, state, PipelineState::Idle, Some(message), None);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,14 +301,13 @@ fn handler_loop(
                     mode = Mode::Ptt;
                     pending_tap = false;
                     spawn_max_session_timer(&timer_tx);
-                    set_state(&state, PipelineState::Recording);
-                    emit(
+                    transition(
                         &app,
-                        PipelineEvent {
-                            state: PipelineState::Recording,
-                            error: None,
-                            transcript: None,
-                        },
+                        &db,
+                        &state,
+                        PipelineState::Recording,
+                        None,
+                        None,
                     );
                 }
                 // Down while Ptt (second press of entering double-tap) or
@@ -232,15 +320,7 @@ fn handler_loop(
                     pending_tap = false;
                     first_tap_at = None;
                 } else {
-                    set_state(&state, PipelineState::Idle);
-                    emit(
-                        &app,
-                        PipelineEvent {
-                            state: PipelineState::Idle,
-                            error: None,
-                            transcript: None,
-                        },
-                    );
+                    transition(&app, &db, &state, PipelineState::Idle, None, None);
                 }
             }
             Msg::Hotkey(HotkeyEvent::TapUp) => match mode {
@@ -262,17 +342,17 @@ fn handler_loop(
                             mode = Mode::HandsFree;
                             pending_tap = false;
                             spawn_max_session_timer(&timer_tx);
-                        } else {
-                            fail(&app, &state, "microphone unavailable".to_string());
-                            mode = Mode::Idle;
-                        }
                     } else {
-                        // Slow second tap — treat as hands-free entry too
-                        // but without resetting the buffer.
-                        mode = Mode::HandsFree;
-                        pending_tap = false;
+                        fail(&app, &db, &state, "microphone unavailable".to_string());
+                        mode = Mode::Idle;
                     }
+                } else {
+                    // Slow second tap — treat as hands-free entry too
+                    // but without resetting the buffer.
+                    mode = Mode::HandsFree;
+                    pending_tap = false;
                 }
+            }
                 Mode::HandsFree => {
                     finish_session(&app, &db, &state, &mut audio, &mut current_app);
                     mode = Mode::Idle;
@@ -286,15 +366,7 @@ fn handler_loop(
                 mode = Mode::Idle;
                 pending_tap = false;
                 first_tap_at = None;
-                set_state(&state, PipelineState::Idle);
-                emit(
-                    &app,
-                    PipelineEvent {
-                        state: PipelineState::Idle,
-                        error: None,
-                        transcript: None,
-                    },
-                );
+                transition(&app, &db, &state, PipelineState::Idle, None, None);
             }
         }
     }
@@ -327,17 +399,9 @@ fn finish_session(
         ),
         Ok(None) => {
             let _ = std::fs::remove_file(&wav_path);
-            set_state(state, PipelineState::Idle);
-            emit(
-                app,
-                PipelineEvent {
-                    state: PipelineState::Idle,
-                    error: None,
-                    transcript: None,
-                },
-            );
+            transition(app, db, state, PipelineState::Idle, None, None);
         }
-        Err(e) => fail(app, state, e.to_string()),
+        Err(e) => fail(app, db, state, e.to_string()),
     }
 }
 
@@ -349,14 +413,13 @@ fn run_session(
     duration_ms: i64,
     target_app: String,
 ) {
-    set_state(state, PipelineState::Transcribing);
-    emit(
+    transition(
         app,
-        PipelineEvent {
-            state: PipelineState::Transcribing,
-            error: None,
-            transcript: None,
-        },
+        db,
+        state,
+        PipelineState::Transcribing,
+        None,
+        None,
     );
 
     let language = {
@@ -372,10 +435,15 @@ fn run_session(
 
     let raw_text = match result {
         Ok(r) => r.text,
-        Err(e) => return fail(app, state, e.to_string()),
+        Err(e) => return fail(app, db, state, e.to_string()),
     };
     if raw_text.trim().is_empty() {
-        return fail(app, state, "transcription came back empty".to_string());
+        return fail(
+            app,
+            db,
+            state,
+            "transcription came back empty".to_string(),
+        );
     }
 
     let data = SessionData::new(duration_ms, target_app, language);
@@ -386,15 +454,7 @@ fn run_session(
         return finish(app, db, state, &expanded, &raw_text, &data);
     }
 
-    set_state(state, PipelineState::Injecting);
-    emit(
-        app,
-        PipelineEvent {
-            state: PipelineState::Injecting,
-            error: None,
-            transcript: None,
-        },
-    );
+    transition(app, db, state, PipelineState::Injecting, None, None);
 
     // LLM cleanup; fall back to the raw transcription on any failure so a
     // cleanup outage never costs the user their dictation.
@@ -436,7 +496,6 @@ fn run_command(
         }
     }
 
-    set_state(state, PipelineState::Idle);
     match db.insert_transcript(
         polished,
         raw_text,
@@ -444,15 +503,15 @@ fn run_command(
         data.duration_ms,
         "command",
     ) {
-        Ok(transcript) => emit(
+        Ok(transcript) => transition(
             app,
-            PipelineEvent {
-                state: PipelineState::Idle,
-                error: None,
-                transcript: Some(transcript),
-            },
+            db,
+            state,
+            PipelineState::Idle,
+            None,
+            Some(transcript),
         ),
-        Err(e) => fail(app, state, e.to_string()),
+        Err(e) => fail(app, db, state, e.to_string()),
     }
 }
 
@@ -480,20 +539,13 @@ fn finish(
     raw_text: &str,
     data: &SessionData,
 ) {
-    set_state(state, PipelineState::Injecting);
-    emit(
-        app,
-        PipelineEvent {
-            state: PipelineState::Injecting,
-            error: None,
-            transcript: None,
-        },
-    );
+    transition(app, db, state, PipelineState::Injecting, None, None);
 
     if let Err(e) = inject::paste_text(final_text) {
         store_anyway(db, final_text, raw_text, data);
         fail(
             app,
+            db,
             state,
             format!("paste failed: {e} — text saved to history"),
         );
@@ -508,17 +560,16 @@ fn finish(
         &data.target_app,
     ) {
         Ok(transcript) => {
-            set_state(state, PipelineState::Idle);
-            emit(
+            transition(
                 app,
-                PipelineEvent {
-                    state: PipelineState::Idle,
-                    error: None,
-                    transcript: Some(transcript),
-                },
+                db,
+                state,
+                PipelineState::Idle,
+                None,
+                Some(transcript),
             );
         }
-        Err(e) => fail(app, state, e.to_string()),
+        Err(e) => fail(app, db, state, e.to_string()),
     }
 }
 

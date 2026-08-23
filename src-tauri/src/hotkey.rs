@@ -14,6 +14,10 @@ pub enum HotkeyEvent {
 }
 
 /// Supported hotkey keys with stable string names for persistence.
+/// Only lists keys the running platform's keyboard backend can actually
+/// detect: macOS has no Right Ctrl (and its right Alt is reported as
+/// Option, with both Cmd keys collapsing into one `Command` code), while
+/// Windows/Linux distinguish Right Ctrl, Right Alt, and Right Win.
 pub const KEY_TABLE: &[(&str, Keycode)] = &[
     ("F1", Keycode::F1),
     ("F2", Keycode::F2),
@@ -29,10 +33,22 @@ pub const KEY_TABLE: &[(&str, Keycode)] = &[
     ("F12", Keycode::F12),
     ("CapsLock", Keycode::CapsLock),
     ("Right Shift", Keycode::RShift),
+    #[cfg(target_os = "macos")]
+    ("Right Option", Keycode::ROption),
+    #[cfg(target_os = "macos")]
+    ("Cmd", Keycode::Command),
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     ("Right Ctrl", Keycode::RControl),
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     ("Right Alt", Keycode::RAlt),
-    ("Right Cmd/Win", Keycode::Command),
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    ("Right Win", Keycode::RMeta),
 ];
+
+/// Names of the hotkey keys offered on this platform, in menu order.
+pub fn key_options() -> Vec<String> {
+    KEY_TABLE.iter().map(|(n, _)| (*n).to_string()).collect()
+}
 
 pub fn parse_key(name: &str) -> Option<Keycode> {
     KEY_TABLE
@@ -146,5 +162,27 @@ mod tests {
     fn parse_unknown_returns_none() {
         assert_eq!(parse_key("Nonsense"), None);
         assert_eq!(parse_key(""), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_table_matches_hardware() {
+        // macOS exposes no right-hand Ctrl (device-query reports only one
+        // Control code), labels the right Alt as Option, and reports both
+        // Cmd keys through a single Command code.
+        assert!(parse_key("Right Ctrl").is_none());
+        assert!(parse_key("Right Alt").is_none());
+        assert_eq!(parse_key("Right Option"), Some(Keycode::ROption));
+        assert_eq!(parse_key("Cmd"), Some(Keycode::Command));
+        let names: Vec<_> = KEY_TABLE.iter().map(|(n, _)| *n).collect();
+        assert!(!names.contains(&"Right Cmd/Win"));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn pc_table_matches_hardware() {
+        assert_eq!(parse_key("Right Ctrl"), Some(Keycode::RControl));
+        assert_eq!(parse_key("Right Alt"), Some(Keycode::RAlt));
+        assert_eq!(parse_key("Right Win"), Some(Keycode::RMeta));
     }
 }

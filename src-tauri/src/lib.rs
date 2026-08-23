@@ -13,7 +13,7 @@ use serde_json::Value;
 use tauri::Manager;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 
-use hotkey::{key_name, parse_key, HotkeyConfig, SharedHotkeyConfig};
+use hotkey::{key_name, key_options, parse_key, HotkeyConfig, SharedHotkeyConfig};
 use pipeline::Pipeline;
 use store::Store;
 
@@ -27,9 +27,9 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
     f(&state.db)
 }
 
-const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
+pub(crate) const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
 
-fn flowbar_auto_hide(db: &Store) -> bool {
+pub(crate) fn flowbar_auto_hide(db: &Store) -> bool {
     db.get_setting("flowBarStyle")
         .ok()
         .flatten()
@@ -242,6 +242,11 @@ fn get_hotkey(state: tauri::State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
+fn hotkey_options() -> Vec<String> {
+    key_options()
+}
+
+#[tauri::command]
 fn set_hotkey(state: tauri::State<AppState>, names: Vec<String>) -> store::Result<Vec<String>> {
     if names.is_empty() {
         return Err(store::StoreError::Other(
@@ -394,12 +399,41 @@ fn load_hotkey_config(db: &Store) -> SharedHotkeyConfig {
         .flatten()
         .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
     {
-        let keys: Vec<_> = names.iter().filter_map(|n| parse_key(n)).collect();
+        let migrated: Vec<String> = names
+            .iter()
+            .filter_map(|n| canonicalize_key_name(n))
+            .collect();
+        let keys: Vec<_> = migrated.iter().filter_map(|n| parse_key(n)).collect();
         if !keys.is_empty() {
             config.keys = keys;
+            if migrated != names {
+                // Persist the rewritten names so Settings shows real options.
+                let _ = db.set_setting("hotkeyKeys", &serde_json::json!(migrated));
+            }
         }
     }
     Arc::new(RwLock::new(config))
+}
+
+/// Maps a persisted hotkey name onto this platform's KEY_TABLE. Handles
+/// names written by older releases ("Right Cmd/Win") and drops names the
+/// running platform's keyboard backend cannot detect (e.g. Right Ctrl on
+/// macOS, which reports no such key).
+fn canonicalize_key_name(name: &str) -> Option<String> {
+    if parse_key(name).is_some() {
+        return Some(name.to_string());
+    }
+    match name {
+        "Right Cmd/Win" | "Right Cmd" => {
+            if parse_key("Cmd").is_some() {
+                Some("Cmd".to_string())
+            } else {
+                Some("Right Win".to_string())
+            }
+        }
+        "Right Alt" if parse_key("Right Option").is_some() => Some("Right Option".to_string()),
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -408,11 +442,27 @@ fn accessibility_status() -> bool {
 }
 
 #[tauri::command]
+fn input_monitoring_status() -> bool {
+    inject::is_listen_event_trusted()
+}
+
+#[tauri::command]
 fn open_accessibility_settings(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_url(
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_input_monitoring_settings(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
             None::<&str>,
         )
         .map_err(|e| e.to_string())
@@ -467,6 +517,7 @@ pub fn run() {
             toggle_recording,
             cancel_recording,
             get_hotkey,
+            hotkey_options,
             set_hotkey,
             autostart_status,
             autostart_set,
@@ -476,7 +527,9 @@ pub fn run() {
             check_for_update,
             install_update,
             accessibility_status,
-            open_accessibility_settings
+            input_monitoring_status,
+            open_accessibility_settings,
+            open_input_monitoring_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

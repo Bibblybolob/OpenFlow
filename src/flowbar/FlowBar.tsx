@@ -20,8 +20,9 @@ interface PipelineEvent {
   error?: string;
 }
 
-const BARS = [0.35, 0.6, 1.0, 0.75, 0.5];
+const WAVE_BARS = 26;
 const HIDE_DELAY_MS = 450;
+const STATE_POLL_MS = 300;
 
 const pillVariants = {
   hidden: { opacity: 0, scale: 0.85, y: 12 },
@@ -31,7 +32,9 @@ const pillVariants = {
 export default function FlowBar() {
   const [state, setState] = useState<State>("idle");
   const [hasError, setHasError] = useState(false);
-  const [level, setLevel] = useState(0);
+  const [wave, setWave] = useState<number[]>(() =>
+    new Array(WAVE_BARS).fill(0),
+  );
   const [hotkeyHint, setHotkeyHint] = useState("F5");
   const [hovering, setHovering] = useState(false);
   const [style, setStyle] = useState<PillStyle>({
@@ -43,7 +46,8 @@ export default function FlowBar() {
   });
   const [shown, setShown] = useState(false);
 
-  const levelRef = useRef(0);
+  const stateRef = useRef<State>("idle");
+  const waveRef = useRef<number[]>(new Array(WAVE_BARS).fill(0));
   const syncedRef = useRef(false);
   const wantVisibleRef = useRef(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -58,25 +62,48 @@ export default function FlowBar() {
     let unlistenLevel: (() => void) | undefined;
     let unlistenStyle: (() => void) | undefined;
     let rafId = 0;
+    let pollId: ReturnType<typeof setInterval> | undefined;
+
+    const applyState = (next: State) => {
+      if (next === "recording" && stateRef.current !== "recording") {
+        waveRef.current = new Array(WAVE_BARS).fill(0);
+      }
+      stateRef.current = next;
+      setState(next);
+    };
 
     const smooth = () => {
-      setLevel((prev) => prev + (levelRef.current - prev) * 0.35);
+      // Copy the rolling amplitude history each frame; CSS height
+      // transitions turn the shifts into a scrolling waveform.
+      setWave(waveRef.current.slice());
       rafId = requestAnimationFrame(smooth);
     };
     rafId = requestAnimationFrame(smooth);
 
     listen<PipelineEvent>("pipeline", (e) => {
-      setState(e.payload.type);
+      applyState(e.payload.type);
       setHasError(Boolean(e.payload.error));
     }).then((fn) => (unlistenPipeline = fn));
 
     listen<number>("audio-level", (e) => {
-      levelRef.current = e.payload;
+      const next = waveRef.current.slice(1);
+      next.push(e.payload);
+      waveRef.current = next;
     }).then((fn) => (unlistenLevel = fn));
 
     listen("flowbar-style-changed", () => {
       loadPillStyle().then(setStyle);
     }).then((fn) => (unlistenStyle = fn));
+
+    // Safety net: events can be missed while this hidden window is still
+    // loading (or if its webview throttles listeners), so periodically
+    // reconcile against the Rust-side FSM directly.
+    pollId = setInterval(async () => {
+      const current = (await api.pipelineStatus().catch(() => null)) as
+        | State
+        | null;
+      if (current && current !== stateRef.current) applyState(current);
+    }, STATE_POLL_MS);
 
     const win = getCurrentWebviewWindow();
     let saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -91,7 +118,7 @@ export default function FlowBar() {
       const loaded = await loadPillStyle();
       setStyle(loaded);
       const current = (await api.pipelineStatus().catch(() => "idle")) as State;
-      setState(current);
+      applyState(current);
       const visibleAtLaunch = !(loaded.autoHide && current === "idle");
       wantVisibleRef.current = visibleAtLaunch;
       if (visibleAtLaunch) {
@@ -111,6 +138,7 @@ export default function FlowBar() {
 
     return () => {
       cancelAnimationFrame(rafId);
+      clearInterval(pollId);
       clearTimeout(hideTimer.current);
       unlistenPipeline?.();
       unlistenLevel?.();
@@ -240,17 +268,22 @@ export default function FlowBar() {
         </motion.button>
 
         {recording ? (
-          <div className="flex h-8 w-24 items-center justify-center gap-1">
-            {BARS.map((mult, i) => (
-              <span
-                key={i}
-                className="w-1 rounded-full transition-[height] duration-100 ease-out"
-                style={{
-                  height: `${Math.max(14, Math.min(100, (level * mult + 0.08) * 100))}%`,
-                  backgroundColor: accent.soft,
-                }}
-              />
-            ))}
+          <div className="flex h-8 flex-1 items-center justify-center gap-[3px]">
+            {wave.map((v, i) => {
+              const boosted = Math.min(1, v * 1.35);
+              return (
+                <span
+                  key={i}
+                  className="w-[3px] shrink-0 rounded-full"
+                  style={{
+                    height: `${Math.max(9, boosted * 100)}%`,
+                    backgroundColor: accent.soft,
+                    opacity: 0.45 + boosted * 0.55,
+                    transition: "height 70ms linear",
+                  }}
+                />
+              );
+            })}
           </div>
         ) : busy ? (
           <div className="flex h-8 w-24 items-center justify-center gap-1.5">

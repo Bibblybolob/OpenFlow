@@ -6,10 +6,32 @@ use arboard::Clipboard;
 
 extern "C" {
     fn AXIsProcessTrusted() -> i32;
+
+    // IOKit HID permission check. Request types: 0 = post events,
+    // 1 = listen to events (Input Monitoring). Access results:
+    // 0 = denied, 1 = unknown/not-determined, 2 = granted.
+    #[link_name = "IOHIDCheckAccess"]
+    fn io_hid_check_access(request_type: i64) -> i64;
 }
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {}
+
+const K_IO_HID_REQUEST_TYPE_LISTEN_EVENT: i64 = 1;
+const K_IO_HID_ACCESS_GRANTED: i64 = 2;
+const K_IO_HID_ACCESS_UNKNOWN: i64 = 1;
 
 pub fn is_accessibility_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// True when the app may observe keyboard events from any device — the
+/// permission behind global hotkey detection (System Settings → Privacy &
+/// Security → Input Monitoring). Distinct from Accessibility, which covers
+/// synthesizing keystrokes for paste injection.
+pub fn is_listen_event_trusted() -> bool {
+    let result = unsafe { io_hid_check_access(K_IO_HID_REQUEST_TYPE_LISTEN_EVENT) };
+    result == K_IO_HID_ACCESS_GRANTED || result == K_IO_HID_ACCESS_UNKNOWN
 }
 
 /// Bundle identifier (e.g. "com.apple.Mail") of the frontmost application,

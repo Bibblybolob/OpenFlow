@@ -77,8 +77,13 @@ export const api = {
 
   accessibilityStatus: () => invoke<boolean>("accessibility_status"),
 
+  inputMonitoringStatus: () => invoke<boolean>("input_monitoring_status"),
+
   openAccessibilitySettings: () =>
     invoke<void>("open_accessibility_settings"),
+
+  openInputMonitoringSettings: () =>
+    invoke<void>("open_input_monitoring_settings"),
 
   toggleRecording: () => invoke<string>("toggle_recording"),
 
@@ -87,6 +92,8 @@ export const api = {
   pipelineStatus: () => invoke<string>("pipeline_status"),
 
   getHotkey: () => invoke<string[]>("get_hotkey"),
+
+  hotkeyOptions: () => invoke<string[]>("hotkey_options"),
 
   setHotkey: (names: string[]) => invoke<string[]>("set_hotkey", { names }),
 

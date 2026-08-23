@@ -2,13 +2,19 @@
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{frontmost_app, is_accessibility_trusted, paste_text};
+pub use macos::{frontmost_app, is_accessibility_trusted, is_listen_event_trusted, paste_text};
 
 #[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
 pub use windows::{frontmost_app, is_accessibility_trusted, paste_text};
+
+/// Windows has no per-app gate on reading global key state.
+#[cfg(target_os = "windows")]
+pub fn is_listen_event_trusted() -> bool {
+    true
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn is_accessibility_trusted() -> bool {
