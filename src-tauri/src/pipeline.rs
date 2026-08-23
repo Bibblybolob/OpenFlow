@@ -83,9 +83,7 @@ impl Pipeline {
             std::thread::spawn(move || {
                 let mut announced = false;
                 loop {
-                    if inject::is_accessibility_trusted()
-                        && inject::is_listen_event_trusted()
-                    {
+                    if inject::is_accessibility_trusted() && inject::is_listen_event_trusted() {
                         break;
                     }
                     if !announced {
@@ -301,14 +299,7 @@ fn handler_loop(
                     mode = Mode::Ptt;
                     pending_tap = false;
                     spawn_max_session_timer(&timer_tx);
-                    transition(
-                        &app,
-                        &db,
-                        &state,
-                        PipelineState::Recording,
-                        None,
-                        None,
-                    );
+                    transition(&app, &db, &state, PipelineState::Recording, None, None);
                 }
                 // Down while Ptt (second press of entering double-tap) or
                 // HandsFree (exit press): keep recording; release decides.
@@ -342,17 +333,17 @@ fn handler_loop(
                             mode = Mode::HandsFree;
                             pending_tap = false;
                             spawn_max_session_timer(&timer_tx);
+                        } else {
+                            fail(&app, &db, &state, "microphone unavailable".to_string());
+                            mode = Mode::Idle;
+                        }
                     } else {
-                        fail(&app, &db, &state, "microphone unavailable".to_string());
-                        mode = Mode::Idle;
+                        // Slow second tap — treat as hands-free entry too
+                        // but without resetting the buffer.
+                        mode = Mode::HandsFree;
+                        pending_tap = false;
                     }
-                } else {
-                    // Slow second tap — treat as hands-free entry too
-                    // but without resetting the buffer.
-                    mode = Mode::HandsFree;
-                    pending_tap = false;
                 }
-            }
                 Mode::HandsFree => {
                     finish_session(&app, &db, &state, &mut audio, &mut current_app);
                     mode = Mode::Idle;
@@ -413,14 +404,7 @@ fn run_session(
     duration_ms: i64,
     target_app: String,
 ) {
-    transition(
-        app,
-        db,
-        state,
-        PipelineState::Transcribing,
-        None,
-        None,
-    );
+    transition(app, db, state, PipelineState::Transcribing, None, None);
 
     let language = {
         let raw = db.get_setting("language").ok().flatten();
@@ -438,12 +422,7 @@ fn run_session(
         Err(e) => return fail(app, db, state, e.to_string()),
     };
     if raw_text.trim().is_empty() {
-        return fail(
-            app,
-            db,
-            state,
-            "transcription came back empty".to_string(),
-        );
+        return fail(app, db, state, "transcription came back empty".to_string());
     }
 
     let data = SessionData::new(duration_ms, target_app, language);
@@ -503,14 +482,7 @@ fn run_command(
         data.duration_ms,
         "command",
     ) {
-        Ok(transcript) => transition(
-            app,
-            db,
-            state,
-            PipelineState::Idle,
-            None,
-            Some(transcript),
-        ),
+        Ok(transcript) => transition(app, db, state, PipelineState::Idle, None, Some(transcript)),
         Err(e) => fail(app, db, state, e.to_string()),
     }
 }
@@ -560,14 +532,7 @@ fn finish(
         &data.target_app,
     ) {
         Ok(transcript) => {
-            transition(
-                app,
-                db,
-                state,
-                PipelineState::Idle,
-                None,
-                Some(transcript),
-            );
+            transition(app, db, state, PipelineState::Idle, None, Some(transcript));
         }
         Err(e) => fail(app, db, state, e.to_string()),
     }
