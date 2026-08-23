@@ -67,7 +67,9 @@ pub(crate) fn remember_pasted(text: &str) {
 
 /// Removes the last pasted text via synthesized undo ("scratch that").
 pub(crate) fn scratch_last() -> Result<(), String> {
-    let mut slot = LAST_PASTED.lock().map_err(|_| "lock poisoned".to_string())?;
+    let mut slot = LAST_PASTED
+        .lock()
+        .map_err(|_| "lock poisoned".to_string())?;
     if slot.is_none() {
         return Err("nothing recent to remove".to_string());
     }
@@ -346,10 +348,7 @@ fn paste_text_at_cursor(_state: tauri::State<AppState>, text: String) -> Result<
 }
 
 #[tauri::command]
-fn retry_last(
-    app: tauri::AppHandle,
-    state: tauri::State<AppState>,
-) -> Result<bool, String> {
+fn retry_last(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<bool, String> {
     let Some(job) = PENDING_RETRY
         .lock()
         .map_err(|_| "lock poisoned".to_string())?
@@ -364,7 +363,10 @@ fn retry_last(
             &app,
             &db,
             &fsm,
-            crate::audio::Recording { duration_ms: 0, wav: job.wav },
+            crate::audio::Recording {
+                duration_ms: 0,
+                wav: job.wav,
+            },
             job.target_app,
         );
     });

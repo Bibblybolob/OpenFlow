@@ -116,8 +116,10 @@ function Welcome({ onNext }: { onNext: () => void }) {
       </div>
       <h1 className="text-xl font-semibold text-white">Welcome to OpenFlow</h1>
       <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-neutral-400">
-        Hold the dictation hotkey, speak naturally, and polished text appears
-        wherever your cursor is — filler words removed, punctuation fixed.
+        Hold the dictation hotkey and speak naturally — ramble, pause, or
+        change your mind mid-sentence. Flow understands what you mean, edits
+        as you speak, and polished text appears wherever your cursor is:
+        filler words removed, punctuation added, writing formatted.
       </p>
       <button
         onClick={onNext}

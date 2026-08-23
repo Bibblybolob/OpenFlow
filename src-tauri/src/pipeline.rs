@@ -521,9 +521,7 @@ fn handler_loop(
                                 &app,
                                 "last dictation removed from the page".to_string(),
                             ),
-                            Err(e) => {
-                                emit_warning(&app, format!("scratch failed: {e}"))
-                            }
+                            Err(e) => emit_warning(&app, format!("scratch failed: {e}")),
                         }
                     } else {
                         last_esc_at = Some(now);

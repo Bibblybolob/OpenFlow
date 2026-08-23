@@ -62,6 +62,16 @@ export default function Home() {
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
+      <div className="rounded-xl border border-white/5 bg-gradient-to-br from-indigo-500/[0.07] to-violet-500/[0.04] px-5 py-4">
+        <p className="text-sm font-medium text-neutral-100">Speak naturally</p>
+        <p className="mt-1 text-xs leading-relaxed text-neutral-400">
+          Ramble, pause, or change your mind mid-sentence. Flow understands
+          what you mean, not just what you say — and it edits as you speak,
+          so the text reads like you wrote it, not like you spoke it: filler
+          words removed, punctuation added, writing formatted.
+        </p>
+      </div>
+
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Home</h1>
         <button

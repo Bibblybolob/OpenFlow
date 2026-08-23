@@ -1,6 +1,8 @@
 # OpenFlow
 
-Push-to-talk voice dictation for macOS and Windows. Hold a hotkey, speak naturally, release — your words are transcribed in the cloud, cleaned up by an LLM (filler words removed, punctuation fixed, self-corrections resolved), and pasted at your cursor in any app.
+**Speak naturally.** Ramble, pause, or change your mind mid-sentence — Flow understands what you mean, not just what you say. **Flow edits as you speak:** text that reads like you wrote it, not like you spoke it, with filler words removed, punctuation added, and your writing formatted automatically.
+
+OpenFlow (FlowClone) is push-to-talk voice dictation for macOS and Windows. Hold a hotkey, speak naturally, release — your words are transcribed, cleaned up by an LLM, and pasted at your cursor in any app.
 
 Built with **Tauri 2** (Rust core + React/TypeScript UI).
 
