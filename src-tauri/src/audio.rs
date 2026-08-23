@@ -39,6 +39,15 @@ pub struct AudioEngine {
     stream: Option<cpal::Stream>,
     started_at: Option<Instant>,
     on_level: Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    device_pref: Option<String>,
+}
+
+/// Names of every input device on the default host, for the Settings picker.
+pub fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices()
+        .map(|devices| devices.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
+        .unwrap_or_default()
 }
 
 impl Default for AudioEngine {
@@ -57,7 +66,14 @@ impl AudioEngine {
             stream: None,
             started_at: None,
             on_level: None,
+            device_pref: None,
         }
+    }
+
+    /// Selects a preferred input device by name. `None` (or the name of a
+    /// device that later disappears) falls back to the system default.
+    pub fn set_device(&mut self, name: Option<String>) {
+        self.device_pref = name.filter(|n| !n.trim().is_empty());
     }
 
     /// Registers a callback receiving input loudness (0.0..1.0) roughly
@@ -72,7 +88,20 @@ impl AudioEngine {
         }
 
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or(AudioError::NoDevice)?;
+        let device = match &self.device_pref {
+            Some(name) => host
+                .input_devices()
+                .ok()
+                .and_then(|mut devices| {
+                    devices.find(|d| d.name().map(|n| &n == name).unwrap_or(false))
+                })
+                .or_else(|| {
+                    eprintln!("mic \"{name}\" not found — using system default");
+                    host.default_input_device()
+                }),
+            None => host.default_input_device(),
+        }
+        .ok_or(AudioError::NoDevice)?;
         let config = device
             .default_input_config()
             .map_err(|e| AudioError::Stream(e.to_string()))?;
@@ -178,6 +207,22 @@ impl AudioEngine {
         }
         self.started_at = None;
         self.shared.lock().unwrap().samples.clear();
+    }
+
+    /// Suspends the capture stream without ending the session. Elapsed
+    /// wall-clock time keeps counting, so paused stretches still count
+    /// toward the session duration (v1 tradeoff).
+    pub fn pause(&mut self) {
+        if let Some(stream) = self.stream.as_ref() {
+            let _ = stream.pause();
+        }
+    }
+
+    /// Resumes a paused capture stream.
+    pub fn resume(&mut self) {
+        if let Some(stream) = self.stream.as_ref() {
+            let _ = stream.play();
+        }
     }
 
     /// Opens a short-lived capture stream to (a) trigger macOS's mic

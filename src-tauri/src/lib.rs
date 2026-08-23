@@ -5,6 +5,7 @@ mod hotkey;
 mod inject;
 mod learn;
 mod pipeline;
+mod sound;
 mod store;
 
 use std::fs;
@@ -283,6 +284,24 @@ fn toggle_recording(state: tauri::State<AppState>) -> pipeline::PipelineState {
 #[tauri::command]
 fn cancel_recording(state: tauri::State<AppState>) {
     state.pipeline.cancel();
+}
+
+#[tauri::command]
+fn toggle_pause(state: tauri::State<AppState>) -> pipeline::PipelineState {
+    state.pipeline.toggle_pause();
+    state.pipeline.current()
+}
+
+#[tauri::command]
+fn list_mics() -> Vec<String> {
+    audio::list_input_devices()
+}
+
+#[tauri::command]
+fn set_mic_device(state: tauri::State<AppState>, name: Option<String>) -> store::Result<()> {
+    with_db(&state, |db| {
+        db.set_setting("micDevice", &serde_json::json!(name))
+    })
 }
 
 #[tauri::command]
@@ -681,6 +700,9 @@ pub fn run() {
             hotkey_watcher_status,
             toggle_recording,
             cancel_recording,
+            toggle_pause,
+            list_mics,
+            set_mic_device,
             get_hotkey,
             hotkey_options,
             set_hotkey,

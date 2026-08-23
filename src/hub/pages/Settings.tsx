@@ -75,6 +75,9 @@ export default function Settings({
     "F1", "CapsLock", "Right Shift",
   ]);
   const [watcherStatus, setWatcherStatus] = useState("waiting-permissions");
+  const [mics, setMics] = useState<string[]>([]);
+  const [mic, setMic] = useState<string>("");
+  const [soundEffects, setSoundEffects] = useState(true);
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -136,6 +139,9 @@ export default function Settings({
       .hotkeyOptions()
       .catch(() => ["F1", "CapsLock", "Right Shift"]);
     const ws = await api.hotkeyWatcherStatus().catch(() => "waiting-permissions");
+    const micList = await api.listMics().catch(() => [] as string[]);
+    const micPref = await api.getSetting<string>("micDevice");
+    const se = await api.getSetting<boolean>("soundEffects");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
@@ -157,6 +163,9 @@ export default function Settings({
     setHotkey(hk.length ? hk : ["Right Shift"]);
     setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "CapsLock", "Right Shift"]);
     setWatcherStatus(ws);
+    setMics(micList);
+    setMic(micPref ?? "");
+    setSoundEffects(se ?? true);
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
@@ -271,6 +280,26 @@ export default function Settings({
     await api.setSetting("language", code === "auto" ? "" : code);
   }
 
+  async function changeMic(name: string) {
+    setMic(name);
+    try {
+      await api.setMicDevice(name || null);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function toggleSoundEffects() {
+    const next = !soundEffects;
+    setSoundEffects(next);
+    try {
+      await api.setSetting("soundEffects", next);
+    } catch (e) {
+      console.error(e);
+      setSoundEffects(!next);
+    }
+  }
+
   async function toggleAutostart() {
     const next = !autostart;
     setAutostart(next);
@@ -366,11 +395,26 @@ export default function Settings({
             onChange={changeLanguage}
           />
         </div>
+        <SelectRow
+          label="Microphone"
+          value={mic}
+          options={[
+            { value: "", label: "System default" },
+            ...mics.map((m) => ({ value: m, label: m })),
+          ]}
+          onChange={changeMic}
+        />
         <ToggleRow
           label="Launch at login"
           hint="Start FlowClone automatically when you sign in"
           checked={autostart}
           onChange={toggleAutostart}
+        />
+        <ToggleRow
+          label="Start & stop chimes"
+          hint="Subtle audio feedback when dictation starts and stops"
+          checked={soundEffects}
+          onChange={toggleSoundEffects}
         />
         <ToggleRow
           label="Voice commands"

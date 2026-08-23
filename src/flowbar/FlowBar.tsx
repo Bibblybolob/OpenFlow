@@ -13,7 +13,7 @@ import {
   type PillStyle,
 } from "../lib/pillStyle";
 
-type State = "idle" | "recording" | "transcribing" | "injecting";
+type State = "idle" | "recording" | "transcribing" | "injecting" | "paused";
 
 interface PipelineEvent {
   type: State;
@@ -158,8 +158,9 @@ export default function FlowBar() {
   }, [hasError]);
 
   const recording = state === "recording";
+  const paused = state === "paused";
   const busy = state === "transcribing" || state === "injecting";
-  const active = recording || busy || hasError;
+  const active = recording || paused || busy || hasError;
   const accent = accentOf(style);
 
   // Drive the waveform + silence detector only while recording; hidden
@@ -213,7 +214,21 @@ export default function FlowBar() {
 
   async function onMicClick() {
     try {
+      // While paused the main button resumes instead of toggling a stop
+      // that the FSM would ignore.
+      if (stateRef.current === "paused") {
+        await api.togglePause();
+        return;
+      }
       await api.toggleRecording();
+    } catch {
+      // window command unavailable — ignore
+    }
+  }
+
+  async function onPauseClick() {
+    try {
+      await api.togglePause();
     } catch {
       // window command unavailable — ignore
     }
@@ -271,22 +286,32 @@ export default function FlowBar() {
 
         <motion.button
           onClick={onMicClick}
-          title={recording ? "Stop (Esc to cancel)" : "Start dictation"}
+          title={
+            paused
+              ? "Resume"
+              : recording
+                ? "Stop (Esc to cancel)"
+                : "Start dictation"
+          }
           whileTap={style.animations ? { scale: 0.88 } : undefined}
           whileHover={style.animations ? { scale: 1.06 } : undefined}
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
-            recording ? "bg-red-500/90 text-white" : "text-white"
+            recording && !paused ? "bg-red-500/90 text-white" : "text-white"
           }`}
           style={
-            recording
+            recording && !paused
               ? undefined
               : {
                   background: `linear-gradient(135deg, ${accent.base}, ${shade(accent.base, -0.4)})`,
                 }
           }
         >
-          {recording ? (
+          {recording && !paused ? (
             <span className="h-3 w-3 rounded-sm bg-white" />
+          ) : paused ? (
+            <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-4 w-4">
+              <path d="M8 5.5v13l11-6.5-11-6.5Z" />
+            </svg>
           ) : (
             <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
               <path d="M12 15a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v5.5A3.5 3.5 0 0 0 12 15Z" />
@@ -295,7 +320,29 @@ export default function FlowBar() {
           )}
         </motion.button>
 
-        {recording ? (
+        {(recording || paused) && (
+          <button
+            onClick={onPauseClick}
+            title={paused ? "Resume" : "Pause"}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-white/10 hover:text-white"
+          >
+            {paused ? (
+              <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-3.5 w-3.5">
+                <path d="M8 5.5v13l11-6.5-11-6.5Z" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5">
+                <path d="M7 5h4v14H7V5Zm6 0h4v14h-4V5Z" />
+              </svg>
+            )}
+          </button>
+        )}
+
+        {paused ? (
+          <div className="flex h-8 flex-1 items-center justify-center">
+            <span className="text-xs text-neutral-400">Paused</span>
+          </div>
+        ) : recording ? (
           <div className="flex h-8 flex-1 items-center justify-center gap-[3px]">
             {wave.map((v, i) => {
               const boosted = Math.min(1, v * 1.35);

@@ -41,6 +41,7 @@ pub enum PipelineState {
     Recording,
     Transcribing,
     Injecting,
+    Paused,
 }
 
 impl PipelineState {
@@ -50,6 +51,17 @@ impl PipelineState {
             PipelineState::Recording => 1,
             PipelineState::Transcribing => 2,
             PipelineState::Injecting => 3,
+            PipelineState::Paused => 4,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => PipelineState::Recording,
+            2 => PipelineState::Transcribing,
+            3 => PipelineState::Injecting,
+            4 => PipelineState::Paused,
+            _ => PipelineState::Idle,
         }
     }
 }
@@ -61,6 +73,7 @@ impl fmt::Display for PipelineState {
             PipelineState::Recording => "recording",
             PipelineState::Transcribing => "transcribing",
             PipelineState::Injecting => "injecting",
+            PipelineState::Paused => "paused",
         };
         write!(f, "{s}")
     }
@@ -79,6 +92,7 @@ pub struct PipelineEvent {
 enum Msg {
     Hotkey(HotkeyEvent),
     Cancel,
+    PauseToggle,
     /// Sent by the worker thread once post-processing (STT/LLM/inject)
     /// completes, so the hotkey handler can accept new dictations again.
     SessionDone,
@@ -163,12 +177,7 @@ impl Pipeline {
     }
 
     pub fn current(&self) -> PipelineState {
-        match self.state.load(Ordering::Relaxed) {
-            1 => PipelineState::Recording,
-            2 => PipelineState::Transcribing,
-            3 => PipelineState::Injecting,
-            _ => PipelineState::Idle,
-        }
+        PipelineState::from_u8(self.state.load(Ordering::Relaxed))
     }
 
     /// Starts a recording without the hotkey (Flow Bar click).
@@ -188,6 +197,11 @@ impl Pipeline {
     /// Cancels the active session, discarding audio (Esc while recording).
     pub fn cancel(&self) {
         let _ = self.control_tx.send(Msg::Cancel);
+    }
+
+    /// Suspends/resumes capture without ending the session (pill button).
+    pub fn toggle_pause(&self) {
+        let _ = self.control_tx.send(Msg::PauseToggle);
     }
 
     /// Starts or finishes a recording (Flow Bar click).
@@ -214,7 +228,8 @@ fn emit(app: &AppHandle, event: PipelineEvent) {
 
 /// Applies a pipeline state change: updates the FSM atom, drives Flow Bar
 /// window visibility natively (so a missed webview event can never leave the
-/// pill stuck hidden), and broadcasts the event to the webviews.
+/// pill stuck hidden), plays start/stop chimes on edges, and broadcasts the
+/// event to the webviews.
 fn transition(
     app: &AppHandle,
     db: &Store,
@@ -223,9 +238,22 @@ fn transition(
     error: Option<String>,
     transcript: Option<Transcript>,
 ) {
+    let prev = PipelineState::from_u8(state.load(Ordering::Relaxed));
     set_state(state, next);
     sync_flowbar(app, db, state);
     crate::update_tray(app, next);
+    if prev != next && crate::sound::enabled(db) {
+        use crate::sound::Chime;
+        match (prev, next) {
+            (PipelineState::Idle, PipelineState::Recording) => {
+                crate::sound::play(Chime::Start);
+            }
+            (PipelineState::Idle, _) | (_, PipelineState::Idle) => {
+                crate::sound::play(Chime::Stop);
+            }
+            _ => {}
+        }
+    }
     emit(
         app,
         PipelineEvent {
@@ -244,12 +272,7 @@ fn sync_flowbar(app: &AppHandle, db: &Store, state: &Arc<AtomicU8>) {
     let Some(window) = app.get_webview_window("flowbar") else {
         return;
     };
-    let next = match state.load(Ordering::Relaxed) {
-        1 => PipelineState::Recording,
-        2 => PipelineState::Transcribing,
-        3 => PipelineState::Injecting,
-        _ => PipelineState::Idle,
-    };
+    let next = PipelineState::from_u8(state.load(Ordering::Relaxed));
     if !crate::flowbar_auto_hide(db) || next != PipelineState::Idle {
         clamp_flowbar_position(&window);
         let _ = window.show();
@@ -336,6 +359,14 @@ fn handler_loop(
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Hotkey(HotkeyEvent::Down) => {
+                if mode != Mode::Idle
+                    && state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8()
+                {
+                    // Pressing the hotkey while paused resumes capture.
+                    audio.resume();
+                    transition(&app, &db, &state, PipelineState::Recording, None, None);
+                    continue;
+                }
                 if mode == Mode::Idle {
                     if busy.load(Ordering::Relaxed) {
                         // Previous dictation still processing — queue a
@@ -344,6 +375,7 @@ fn handler_loop(
                         continue;
                     }
                     current_app = inject::frontmost_app();
+                    audio.set_device(mic_preference(&db));
                     if let Err(e) = audio.start() {
                         // Never swallow this: a dead mic must look different
                         // from a dead hotkey, or users cannot tell them apart.
@@ -393,6 +425,7 @@ fn handler_loop(
                         // go hands-free.
                         audio.discard();
                         current_app = inject::frontmost_app();
+                        audio.set_device(mic_preference(&db));
                         if let Err(e) = audio.start() {
                             fail(&app, &db, &state, format!("microphone unavailable: {e}"));
                             mode = Mode::Idle;
@@ -424,6 +457,17 @@ fn handler_loop(
                 }
                 Mode::Idle => {}
             },
+            Msg::PauseToggle => {
+                if mode == Mode::Ptt || mode == Mode::HandsFree {
+                    if state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8() {
+                        audio.resume();
+                        transition(&app, &db, &state, PipelineState::Recording, None, None);
+                    } else {
+                        audio.pause();
+                        transition(&app, &db, &state, PipelineState::Paused, None, None);
+                    }
+                }
+            }
             Msg::Cancel => {
                 audio.discard();
                 mode = Mode::Idle;
@@ -439,6 +483,7 @@ fn handler_loop(
                     // begin that queued dictation now.
                     pending_start = false;
                     current_app = inject::frontmost_app();
+                    audio.set_device(mic_preference(&db));
                     if let Err(e) = audio.start() {
                         fail(&app, &db, &state, format!("microphone unavailable: {e}"));
                     } else {
@@ -643,6 +688,15 @@ fn cleanup_enabled(db: &Store) -> bool {
         .flatten()
         .and_then(|v| serde_json::from_str::<bool>(&v).ok())
         .unwrap_or(true)
+}
+
+/// Preferred input device name from settings; None = system default.
+fn mic_preference(db: &Store) -> Option<String> {
+    db.get_setting("micDevice")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<Option<String>>(&v).ok())
+        .flatten()
 }
 
 fn cleanup_skip_short(db: &Store) -> bool {

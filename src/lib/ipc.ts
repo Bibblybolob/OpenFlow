@@ -89,6 +89,13 @@ export const api = {
 
   cancelRecording: () => invoke<void>("cancel_recording"),
 
+  togglePause: () => invoke<string>("toggle_pause"),
+
+  listMics: () => invoke<string[]>("list_mics"),
+
+  setMicDevice: (name: string | null) =>
+    invoke<void>("set_mic_device", { name }),
+
   pipelineStatus: () => invoke<string>("pipeline_status"),
 
   hotkeyWatcherStatus: () => invoke<string>("hotkey_watcher_status"),
