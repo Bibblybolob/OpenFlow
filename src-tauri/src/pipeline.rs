@@ -225,6 +225,7 @@ fn transition(
 ) {
     set_state(state, next);
     sync_flowbar(app, db, state);
+    crate::update_tray(app, next);
     emit(
         app,
         PipelineEvent {

@@ -11,6 +11,8 @@ use std::fs;
 use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 
@@ -30,6 +32,30 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
 }
 
 pub(crate) const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
+
+/// Handle to the tray's Start/Stop item so the pipeline can relabel it as
+/// the dictation state changes.
+pub struct TrayMenu {
+    toggle: MenuItem<tauri::Wry>,
+}
+
+/// Reflects the pipeline state into the tray: the first menu item toggles
+/// between "Start dictation" / "Stop dictation" and the tooltip names the
+/// current state.
+pub(crate) fn update_tray(app: &tauri::AppHandle, next: pipeline::PipelineState) {
+    let Some(tray_menu) = app.try_state::<TrayMenu>() else {
+        return;
+    };
+    let label = match next {
+        pipeline::PipelineState::Idle => "Start dictation",
+        pipeline::PipelineState::Recording => "Stop dictation",
+        _ => "Working…",
+    };
+    let _ = tray_menu.toggle.set_text(label);
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(format!("FlowClone — {next}")));
+    }
+}
 
 pub(crate) fn flowbar_auto_hide(db: &Store) -> bool {
     db.get_setting("flowBarStyle")
@@ -579,6 +605,52 @@ pub fn run() {
                         .send();
                 }
             });
+
+            // Menu-bar tray: status tooltip, start/stop, cancel, Hub access
+            // and quit — a control surface that survives a hidden pill.
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let toggle =
+                    MenuItem::with_id(app, "toggle", "Start dictation", true, None::<&str>)?;
+                let cancel =
+                    MenuItem::with_id(app, "cancel", "Cancel dictation", true, None::<&str>)?;
+                let hub = MenuItem::with_id(app, "hub", "Open Hub", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit FlowClone", true, None::<&str>)?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let menu = Menu::with_items(
+                    app,
+                    &[
+                        &toggle,
+                        &cancel,
+                        &sep,
+                        &hub,
+                        &PredefinedMenuItem::separator(app)?,
+                        &quit,
+                    ],
+                )?;
+                TrayIconBuilder::with_id("main-tray")
+                    .icon(icon)
+                    .tooltip("FlowClone — idle")
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "toggle" => {
+                            app.state::<AppState>().pipeline.toggle();
+                        }
+                        "cancel" => {
+                            app.state::<AppState>().pipeline.cancel();
+                        }
+                        "hub" => {
+                            if let Some(window) = app.get_webview_window("hub") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .build(app)?;
+                app.manage(TrayMenu { toggle });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
