@@ -11,6 +11,7 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **Pause & resume** — pause an active dictation from the pill and pick up mid-thought without ending the session.
 - **Microphone picker** — dictate through any input device (or the system default); the choice survives restarts.
 - **Start/stop chimes** — subtle synthesized audio feedback when a session opens and closes (toggleable).
+- **Silence intelligence** — leading/trailing silence is trimmed before upload (adaptive noise-floor threshold, mid-sentence pauses preserved), and hands-free sessions auto-stop after ~5 s of quiet so walking away never leaves a giant accidental transcript.
 - **AI cleanup** — GPT-4o-mini (OpenAI), Claude (Anthropic), or any model via OpenRouter rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), backtrack handling.
 - **Pluggable LLM providers** — bring an OpenAI, Claude, OpenRouter, or mix of keys; auto-detect or force a provider per your preference.
 - **Voice commands** — say "open youtube", "search rust async", or "copy …" to act instead of typing (toggleable).

@@ -193,7 +193,14 @@ impl AudioEngine {
             return Ok(None);
         }
 
-        let wav = encode_wav(&resample_to_16k(&samples, capture_rate), TARGET_SAMPLE_RATE)?;
+        // Edge-silence trim: uploads shrink ~2x for typical dictation
+        // (leading dead air + trailing silence), directly cutting STT
+        // upload+processing time. Mid-sentence pauses are untouched — only
+        // the edges are trimmed.
+        let (start, end) = trim_silence(&samples, capture_rate);
+        let trimmed = &samples[start..end];
+
+        let wav = encode_wav(&resample_to_16k(trimmed, capture_rate), TARGET_SAMPLE_RATE)?;
         Ok(Some(Recording {
             duration_ms: elapsed_ms,
             wav,
@@ -274,6 +281,40 @@ fn push_levelled(
         let recent = &s.samples[start..];
         let rms = (recent.iter().map(|x| x * x).sum::<f32>() / recent.len().max(1) as f32).sqrt();
         cb((rms * 4.0).clamp(0.0, 1.0));
+    }
+}
+
+/// Frame-wise energy trim of leading/trailing silence. The threshold adapts
+/// to the recording's own noise floor (10th-percentile frame RMS x3, with a
+/// small absolute floor), so quiet mics and noisy rooms both behave.
+/// Returns sample bounds; never returns an empty range for non-empty input
+/// (falls back to the full buffer when no frame clears the threshold).
+fn trim_silence(samples: &[f32], sample_rate: u32) -> (usize, usize) {
+    let frame_len = ((sample_rate as f32 * 0.02) as usize).max(1); // 20 ms
+    let n_frames = samples.len() / frame_len;
+    if n_frames == 0 {
+        return (0, samples.len());
+    }
+    let mut rms: Vec<f32> = Vec::with_capacity(n_frames);
+    for frame in 0..n_frames {
+        let seg = &samples[frame * frame_len..(frame + 1) * frame_len];
+        rms.push((seg.iter().map(|x| x * x).sum::<f32>() / seg.len() as f32).sqrt());
+    }
+    let mut sorted = rms.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = sorted[sorted.len() / 10];
+    let threshold = (floor * 3.0).max(0.006);
+
+    match (
+        rms.iter().position(|v| *v > threshold),
+        rms.iter().rposition(|v| *v > threshold),
+    ) {
+        (Some(first), Some(last)) => {
+            let start = first * frame_len;
+            let end = ((last + 1) * frame_len).min(samples.len());
+            (start, end)
+        }
+        _ => (0, samples.len()),
     }
 }
 
@@ -382,5 +423,37 @@ mod tests {
     fn resample_passthrough_at_target_rate() {
         let input: Vec<f32> = vec![0.1, -0.2, 0.3];
         assert_eq!(resample_to_16k(&input, 16_000), input);
+    }
+
+    #[test]
+    fn silence_trim_cuts_only_edges() {
+        // 0.5 s of silence, 0.3 s of tone, 0.5 s of silence at 48 kHz.
+        let rate = 48_000u32;
+        let mut samples = vec![0.0f32; rate as usize / 2];
+        samples.extend((0..rate as usize * 3 / 10).map(|i| ((i as f32) / 50.0).sin() * 0.5));
+        samples.resize(samples.len() + rate as usize / 2, 0.0);
+
+        let (start, end) = trim_silence(&samples, rate);
+        // Leading silence is trimmed to within one 20 ms frame.
+        assert!(
+            (start as i64 - rate as i64 / 2).abs() < (rate as f32 * 0.04) as i64,
+            "start {start}"
+        );
+        // Trailing silence likewise.
+        assert!(
+            (end as i64 - samples.len() as i64 + rate as i64 / 2).abs()
+                < (rate as f32 * 0.04) as i64,
+            "end {end} len {}",
+            samples.len()
+        );
+        // The spoken region itself survives intact.
+        assert!(end > start);
+    }
+
+    #[test]
+    fn silence_trim_all_quiet_returns_full_buffer() {
+        let samples = vec![0.001f32; 48_000];
+        let (start, end) = trim_silence(&samples, 48_000);
+        assert_eq!((start, end), (0, samples.len()));
     }
 }

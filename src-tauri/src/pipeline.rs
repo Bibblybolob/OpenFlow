@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -16,6 +16,10 @@ use crate::store::{Store, Transcript};
 
 const MAX_SESSION_SECS: u64 = 360;
 const DOUBLE_TAP_WINDOW_MS: u64 = 700;
+/// Hands-free sessions end themselves after this much silence, so walking
+/// away from the mic doesn't leave a giant accidental transcript behind.
+const HANDS_FREE_SILENCE_STOP_MS: u64 = 5000;
+const VOICE_LEVEL_THRESHOLD: f32 = 0.03;
 
 /// Broadcasts hotkey-watcher lifecycle to the webviews so the Hub can show
 /// "waiting for permission / ready / unavailable" instead of a silent dead
@@ -222,6 +226,13 @@ fn set_state(state: &AtomicU8, next: PipelineState) {
     state.store(next.as_u8(), Ordering::Relaxed);
 }
 
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn emit(app: &AppHandle, event: PipelineEvent) {
     let _ = app.emit("pipeline", event);
 }
@@ -341,14 +352,19 @@ fn handler_loop(
     // start request instead of blocking like the old synchronous flow.
     let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut pending_start = false;
+    // Shared with the level callback (last audible input) and a generation
+    // counter that invalidates stale hands-free auto-stop watchdogs.
+    let last_voice_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let session_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
     {
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last_voice_ms = Arc::clone(&last_voice_ms);
         audio.set_level_callback(move |level| {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
+            let now = unix_ms();
+            if level >= VOICE_LEVEL_THRESHOLD {
+                last_voice_ms.store(now, Ordering::Relaxed);
+            }
             let prev = last_emit.swap(now, Ordering::Relaxed);
             if now.saturating_sub(prev) >= 33 {
                 let _ = emitter.emit("audio-level", level);
@@ -384,6 +400,7 @@ fn handler_loop(
                     }
                     mode = Mode::Ptt;
                     pending_tap = false;
+                    session_gen.fetch_add(1, Ordering::Relaxed);
                     spawn_max_session_timer(&timer_tx);
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                 }
@@ -392,6 +409,7 @@ fn handler_loop(
             }
             Msg::Hotkey(HotkeyEvent::Up) => {
                 if mode != Mode::Idle {
+                    session_gen.fetch_add(1, Ordering::Relaxed);
                     finish_session(
                         &app,
                         &db,
@@ -432,6 +450,14 @@ fn handler_loop(
                         } else {
                             mode = Mode::HandsFree;
                             pending_tap = false;
+                            last_voice_ms.store(unix_ms(), Ordering::Relaxed);
+                            let gen = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                            spawn_handsfree_watchdog(
+                                &timer_tx,
+                                Arc::clone(&last_voice_ms),
+                                Arc::clone(&session_gen),
+                                gen,
+                            );
                             spawn_max_session_timer(&timer_tx);
                         }
                     } else {
@@ -439,9 +465,18 @@ fn handler_loop(
                         // but without resetting the buffer.
                         mode = Mode::HandsFree;
                         pending_tap = false;
+                        last_voice_ms.store(unix_ms(), Ordering::Relaxed);
+                        let gen = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                        spawn_handsfree_watchdog(
+                            &timer_tx,
+                            Arc::clone(&last_voice_ms),
+                            Arc::clone(&session_gen),
+                            gen,
+                        );
                     }
                 }
                 Mode::HandsFree => {
+                    session_gen.fetch_add(1, Ordering::Relaxed);
                     finish_session(
                         &app,
                         &db,
@@ -459,17 +494,20 @@ fn handler_loop(
             },
             Msg::PauseToggle => {
                 if mode == Mode::Ptt || mode == Mode::HandsFree {
-                    if state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8() {
+                    let was_paused = state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8();
+                    if was_paused {
                         audio.resume();
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     } else {
                         audio.pause();
+                        session_gen.fetch_add(1, Ordering::Relaxed);
                         transition(&app, &db, &state, PipelineState::Paused, None, None);
                     }
                 }
             }
             Msg::Cancel => {
                 audio.discard();
+                session_gen.fetch_add(1, Ordering::Relaxed);
                 mode = Mode::Idle;
                 pending_tap = false;
                 first_tap_at = None;
@@ -496,6 +534,27 @@ fn handler_loop(
             }
         }
     }
+}
+
+fn spawn_handsfree_watchdog(
+    tx: &mpsc::Sender<Msg>,
+    last_voice_ms: Arc<std::sync::atomic::AtomicU64>,
+    session_gen: Arc<std::sync::atomic::AtomicU64>,
+    target_gen: u64,
+) {
+    let tx = tx.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(400));
+        if session_gen.load(Ordering::Relaxed) != target_gen {
+            // Session ended, paused, or was cancelled — disarm.
+            return;
+        }
+        let silent_for = unix_ms().saturating_sub(last_voice_ms.load(Ordering::Relaxed));
+        if silent_for > HANDS_FREE_SILENCE_STOP_MS {
+            let _ = tx.send(Msg::Hotkey(HotkeyEvent::Up));
+            return;
+        }
+    });
 }
 
 fn spawn_max_session_timer(tx: &mpsc::Sender<Msg>) {
