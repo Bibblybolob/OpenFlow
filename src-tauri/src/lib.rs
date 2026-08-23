@@ -9,6 +9,7 @@ mod sound;
 mod store;
 
 use std::fs;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
@@ -26,6 +27,7 @@ pub struct AppState {
     pipeline: Pipeline,
     hotkey: SharedHotkeyConfig,
     watcher_status: Arc<RwLock<String>>,
+    mic_level: Arc<AtomicU32>,
 }
 
 fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
@@ -347,6 +349,14 @@ fn pipeline_status(state: tauri::State<AppState>) -> pipeline::PipelineState {
 /// Last reported hotkey-watcher lifecycle state: "waiting-permissions",
 /// "ready", or "unavailable:<reason>". Queryable so the Hub shows the truth
 /// even if it opened after the events fired.
+/// Latest microphone RMS (0.0..1.0), pulled by the pill webview on a timer
+/// instead of pushed via events — WebKit throttles event/rAF delivery in
+/// hidden overlay windows, but invoke+setInterval keep working.
+#[tauri::command]
+fn mic_level(state: tauri::State<AppState>) -> f32 {
+    f32::from_bits(state.mic_level.load(AtomicOrdering::Relaxed))
+}
+
 #[tauri::command]
 fn hotkey_watcher_status(state: tauri::State<AppState>) -> String {
     state.watcher_status.read().unwrap().clone()
@@ -713,17 +723,20 @@ pub fn run() {
             let hotkey = load_hotkey_config(&db);
             create_flowbar(app.handle(), &db)?;
             let watcher_status = Arc::new(RwLock::new("waiting-permissions".to_string()));
+            let mic_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
             let pipeline = Pipeline::start(
                 app.handle().clone(),
                 Arc::clone(&db),
                 Arc::clone(&hotkey),
                 Arc::clone(&watcher_status),
+                Arc::clone(&mic_level),
             );
             app.manage(AppState {
                 db,
                 pipeline,
                 hotkey,
                 watcher_status,
+                mic_level,
             });
             // Pay the DNS+TCP+TLS handshake for the transcription API now,
             // in the background, so the first dictation doesn't. The pooled
@@ -809,6 +822,7 @@ pub fn run() {
             get_setting,
             set_setting,
             pipeline_status,
+            mic_level,
             hotkey_watcher_status,
             toggle_recording,
             cancel_recording,

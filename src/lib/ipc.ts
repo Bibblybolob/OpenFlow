@@ -122,6 +122,8 @@ export const api = {
 
   pipelineStatus: () => invoke<string>("pipeline_status"),
 
+  micLevel: () => invoke<number>("mic_level"),
+
   hotkeyWatcherStatus: () => invoke<string>("hotkey_watcher_status"),
 
   getHotkey: () => invoke<string[]>("get_hotkey"),

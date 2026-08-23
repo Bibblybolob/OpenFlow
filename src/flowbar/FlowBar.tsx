@@ -29,6 +29,7 @@ const STATE_POLL_MS = 300;
 // "the pill is broken".
 const SILENCE_ALERT_MS = 2000;
 const SILENCE_LEVEL_THRESHOLD = 0.05;
+const SAMPLE_INTERVAL_MS = 40;
 
 const pillVariants = {
   hidden: { opacity: 0, scale: 0.85, y: 12 },
@@ -73,7 +74,6 @@ export default function FlowBar() {
     if (rootEl) rootEl.style.background = "transparent";
 
     let unlistenPipeline: (() => void) | undefined;
-    let unlistenLevel: (() => void) | undefined;
     let unlistenStyle: (() => void) | undefined;
     let unlistenPartial: (() => void) | undefined;
     let pollId: ReturnType<typeof setInterval> | undefined;
@@ -101,15 +101,6 @@ export default function FlowBar() {
     listen<{ text: string }>("stt-partial", (e) => {
       setPartial(e.payload.text);
     }).then((fn) => (unlistenPartial = fn));
-
-    listen<number>("audio-level", (e) => {
-      if (e.payload >= SILENCE_LEVEL_THRESHOLD) {
-        lastVoiceAtRef.current = Date.now();
-      }
-      const next = waveRef.current.slice(1);
-      next.push(e.payload);
-      waveRef.current = next;
-    }).then((fn) => (unlistenLevel = fn));
 
     listen("flowbar-style-changed", () => {
       loadPillStyle().then(setStyle);
@@ -160,7 +151,6 @@ export default function FlowBar() {
       clearInterval(pollId);
       clearTimeout(hideTimer.current);
       unlistenPipeline?.();
-      unlistenLevel?.();
       unlistenStyle?.();
       unlistenPartial?.();
       unMoved.then((fn) => fn());
@@ -179,28 +169,34 @@ export default function FlowBar() {
   const active = recording || paused || busy || hasError;
   const accent = accentOf(style);
 
-  // Drive the waveform + silence detector only while recording; hidden
-  // webviews pause rAF anyway, and an idle pill needs no frames.
+  // Waveform + silence detector, driven by polling the Rust-side level
+  // instead of subscribing to events: WebKit starves event delivery and
+  // requestAnimationFrame in this non-activating overlay window, while
+  // invoke + setInterval keep working. ~25fps with a 70ms CSS transition.
   useEffect(() => {
     if (!recording) {
       setMicSilent(false);
       return;
     }
-    let rafId = 0;
     let lastSilent: boolean | null = null;
-    const smooth = () => {
-      // Copy the rolling amplitude history each frame; CSS height
-      // transitions turn the shifts into a scrolling waveform.
-      setWave(waveRef.current.slice());
+    const sample = async () => {
+      const level = await api.micLevel().catch(() => 0);
+      if (level >= SILENCE_LEVEL_THRESHOLD) {
+        lastVoiceAtRef.current = Date.now();
+      }
+      const next = waveRef.current.slice(1);
+      next.push(level);
+      waveRef.current = next;
+      setWave(next);
       const silent = Date.now() - lastVoiceAtRef.current > SILENCE_ALERT_MS;
       if (silent !== lastSilent) {
         lastSilent = silent;
         setMicSilent(silent);
       }
-      rafId = requestAnimationFrame(smooth);
     };
-    rafId = requestAnimationFrame(smooth);
-    return () => cancelAnimationFrame(rafId);
+    sample();
+    const samplerId = setInterval(sample, SAMPLE_INTERVAL_MS);
+    return () => clearInterval(samplerId);
   }, [recording]);
 
   useEffect(() => {

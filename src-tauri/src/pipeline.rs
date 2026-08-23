@@ -113,6 +113,7 @@ impl Pipeline {
         db: Arc<Store>,
         hotkey_config: SharedHotkeyConfig,
         watcher_status: std::sync::Arc<std::sync::RwLock<String>>,
+        mic_level: Arc<std::sync::atomic::AtomicU32>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Msg>();
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
@@ -171,7 +172,7 @@ impl Pipeline {
         {
             let state = Arc::clone(&state);
             let timer_tx = tx.clone();
-            std::thread::spawn(move || handler_loop(app, db, rx, state, timer_tx));
+            std::thread::spawn(move || handler_loop(app, db, rx, state, timer_tx, mic_level));
         }
 
         Self {
@@ -346,6 +347,7 @@ fn handler_loop(
     rx: mpsc::Receiver<Msg>,
     state: Arc<AtomicU8>,
     timer_tx: mpsc::Sender<Msg>,
+    mic_level: Arc<std::sync::atomic::AtomicU32>,
 ) {
     let mut audio = AudioEngine::new();
     let mut current_app = String::new();
@@ -366,7 +368,11 @@ fn handler_loop(
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let last_voice_ms = Arc::clone(&last_voice_ms);
+        let level_cell = Arc::clone(&mic_level);
         audio.set_level_callback(move |level| {
+            // Latest raw level, polled by the pill webview (event push into
+            // a throttled overlay window proved unreliable).
+            level_cell.store(level.to_bits(), Ordering::Relaxed);
             let now = unix_ms();
             if level >= VOICE_LEVEL_THRESHOLD {
                 last_voice_ms.store(now, Ordering::Relaxed);
