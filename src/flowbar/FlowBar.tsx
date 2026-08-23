@@ -23,6 +23,11 @@ interface PipelineEvent {
 const WAVE_BARS = 26;
 const HIDE_DELAY_MS = 450;
 const STATE_POLL_MS = 300;
+// When no audible input reaches the capture stream for this long while
+// recording, tell the user — a flat waveform otherwise looks identical to
+// "the pill is broken".
+const SILENCE_ALERT_MS = 2000;
+const SILENCE_LEVEL_THRESHOLD = 0.05;
 
 const pillVariants = {
   hidden: { opacity: 0, scale: 0.85, y: 12 },
@@ -38,6 +43,7 @@ export default function FlowBar() {
   );
   const [hotkeyHint, setHotkeyHint] = useState("Right Shift");
   const [hovering, setHovering] = useState(false);
+  const [micSilent, setMicSilent] = useState(false);
   const [style, setStyle] = useState<PillStyle>({
     shape: "pill",
     accent: "indigo",
@@ -51,6 +57,7 @@ export default function FlowBar() {
   const waveRef = useRef<number[]>(new Array(WAVE_BARS).fill(0));
   const syncedRef = useRef(false);
   const wantVisibleRef = useRef(false);
+  const lastVoiceAtRef = useRef(0);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => {
@@ -62,24 +69,17 @@ export default function FlowBar() {
     let unlistenPipeline: (() => void) | undefined;
     let unlistenLevel: (() => void) | undefined;
     let unlistenStyle: (() => void) | undefined;
-    let rafId = 0;
     let pollId: ReturnType<typeof setInterval> | undefined;
 
     const applyState = (next: State) => {
       if (next === "recording" && stateRef.current !== "recording") {
         waveRef.current = new Array(WAVE_BARS).fill(0);
+        lastVoiceAtRef.current = Date.now();
+        setMicSilent(false);
       }
       stateRef.current = next;
       setState(next);
     };
-
-    const smooth = () => {
-      // Copy the rolling amplitude history each frame; CSS height
-      // transitions turn the shifts into a scrolling waveform.
-      setWave(waveRef.current.slice());
-      rafId = requestAnimationFrame(smooth);
-    };
-    rafId = requestAnimationFrame(smooth);
 
     listen<PipelineEvent>("pipeline", (e) => {
       applyState(e.payload.type);
@@ -88,6 +88,9 @@ export default function FlowBar() {
     }).then((fn) => (unlistenPipeline = fn));
 
     listen<number>("audio-level", (e) => {
+      if (e.payload >= SILENCE_LEVEL_THRESHOLD) {
+        lastVoiceAtRef.current = Date.now();
+      }
       const next = waveRef.current.slice(1);
       next.push(e.payload);
       waveRef.current = next;
@@ -139,7 +142,6 @@ export default function FlowBar() {
     })();
 
     return () => {
-      cancelAnimationFrame(rafId);
       clearInterval(pollId);
       clearTimeout(hideTimer.current);
       unlistenPipeline?.();
@@ -159,6 +161,30 @@ export default function FlowBar() {
   const busy = state === "transcribing" || state === "injecting";
   const active = recording || busy || hasError;
   const accent = accentOf(style);
+
+  // Drive the waveform + silence detector only while recording; hidden
+  // webviews pause rAF anyway, and an idle pill needs no frames.
+  useEffect(() => {
+    if (!recording) {
+      setMicSilent(false);
+      return;
+    }
+    let rafId = 0;
+    let lastSilent: boolean | null = null;
+    const smooth = () => {
+      // Copy the rolling amplitude history each frame; CSS height
+      // transitions turn the shifts into a scrolling waveform.
+      setWave(waveRef.current.slice());
+      const silent = Date.now() - lastVoiceAtRef.current > SILENCE_ALERT_MS;
+      if (silent !== lastSilent) {
+        lastSilent = silent;
+        setMicSilent(silent);
+      }
+      rafId = requestAnimationFrame(smooth);
+    };
+    rafId = requestAnimationFrame(smooth);
+    return () => cancelAnimationFrame(rafId);
+  }, [recording]);
 
   useEffect(() => {
     if (!syncedRef.current) return;
@@ -286,6 +312,11 @@ export default function FlowBar() {
                 />
               );
             })}
+            {micSilent && (
+              <span className="ml-1 whitespace-nowrap text-[10px] text-amber-300">
+                mic silent?
+              </span>
+            )}
           </div>
         ) : busy ? (
           <div className="flex h-8 w-24 items-center justify-center gap-1.5">

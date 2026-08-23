@@ -14,7 +14,7 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct.
 - **Snippets** — voice shortcuts that expand to full text locally, with zero API latency on exact matches.
 - **Per-app styles** — tone instructions matched against the frontmost app's bundle identifier (e.g., formal in Mail, casual in Slack).
-- **Flow Bar** — floating, focus-safe pill with live waveform, click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
+- **Flow Bar** — floating, focus-safe pill with an always-on live waveform (real mic levels, independent of the animations setting) plus a "mic silent?" alert when the capture stream hears nothing for 2s — so you always know whether the pill is actually listening; click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
 - **History & stats** — searchable transcript history grouped by day, word counts, streaks.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
 - **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (default **Right Shift**: under both palms, never types a character, and never intercepted by macOS features the way F5 is); applies live and migrates stale key names on upgrade.
