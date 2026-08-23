@@ -45,6 +45,7 @@ export default function FlowBar() {
   const [hotkeyHint, setHotkeyHint] = useState("Right Shift");
   const [hovering, setHovering] = useState(false);
   const [micSilent, setMicSilent] = useState(false);
+  const [partial, setPartial] = useState<string | null>(null);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [styles, setStyles] = useState<Style[]>([]);
   const [styleOverride, setStyleOverride] = useState<number | null>(null);
@@ -74,6 +75,7 @@ export default function FlowBar() {
     let unlistenPipeline: (() => void) | undefined;
     let unlistenLevel: (() => void) | undefined;
     let unlistenStyle: (() => void) | undefined;
+    let unlistenPartial: (() => void) | undefined;
     let pollId: ReturnType<typeof setInterval> | undefined;
 
     const applyState = (next: State) => {
@@ -81,6 +83,10 @@ export default function FlowBar() {
         waveRef.current = new Array(WAVE_BARS).fill(0);
         lastVoiceAtRef.current = Date.now();
         setMicSilent(false);
+        setPartial(null);
+      }
+      if (next !== "transcribing" && stateRef.current === "transcribing") {
+        setPartial(null);
       }
       stateRef.current = next;
       setState(next);
@@ -91,6 +97,10 @@ export default function FlowBar() {
       setHasError(Boolean(e.payload.error));
       setErrorText(e.payload.error ?? null);
     }).then((fn) => (unlistenPipeline = fn));
+
+    listen<{ text: string }>("stt-partial", (e) => {
+      setPartial(e.payload.text);
+    }).then((fn) => (unlistenPartial = fn));
 
     listen<number>("audio-level", (e) => {
       if (e.payload >= SILENCE_LEVEL_THRESHOLD) {
@@ -152,6 +162,7 @@ export default function FlowBar() {
       unlistenPipeline?.();
       unlistenLevel?.();
       unlistenStyle?.();
+      unlistenPartial?.();
       unMoved.then((fn) => fn());
     };
   }, []);
@@ -444,15 +455,21 @@ export default function FlowBar() {
             )}
           </div>
         ) : busy ? (
-          <div className="flex h-8 w-24 items-center justify-center gap-1.5">
-            {[0, 1, 2].map((i) => (
-              <span
-                key={i}
-                className="h-2 w-2 animate-bounce rounded-full"
-                style={{ animationDelay: `${i * 120}ms`, backgroundColor: accent.soft }}
-              />
-            ))}
-          </div>
+          partial ? (
+            <p className="line-clamp-2 max-h-8 flex-1 self-center overflow-hidden text-left text-[11px] leading-[1.15rem] text-neutral-200">
+              {partial}
+            </p>
+          ) : (
+            <div className="flex h-8 flex-1 items-center justify-center gap-1.5">
+              {[0, 1, 2].map((i) => (
+                <span
+                  key={i}
+                  className="h-2 w-2 animate-bounce rounded-full"
+                  style={{ animationDelay: `${i * 120}ms`, backgroundColor: accent.soft }}
+                />
+              ))}
+            </div>
+          )
         ) : (
           <span
             className={`flex max-w-44 items-center gap-2 text-xs ${

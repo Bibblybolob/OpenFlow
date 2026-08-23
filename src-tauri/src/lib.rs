@@ -59,6 +59,31 @@ pub(crate) fn clear_retry_job() {
     }
 }
 
+/// Text captured from before the caret while a session records; taken by
+/// the processing worker when the recording ends.
+pub(crate) static CARET_CONTEXT: Mutex<Option<String>> = Mutex::new(None);
+
+pub(crate) fn begin_context_capture() {
+    if let Ok(mut slot) = CARET_CONTEXT.lock() {
+        *slot = None;
+    }
+    // Runs concurrently with recording: reading AX can take 50-150ms and
+    // must not sit on the hotkey path. Focus cannot change meanwhile —
+    // the pill window is not focusable.
+    std::thread::spawn(|| {
+        let ctx = inject::preceding_context();
+        if !ctx.is_empty() {
+            if let Ok(mut slot) = CARET_CONTEXT.lock() {
+                *slot = Some(ctx);
+            }
+        }
+    });
+}
+
+pub(crate) fn take_caret_context() -> Option<String> {
+    CARET_CONTEXT.lock().ok().and_then(|mut slot| slot.take())
+}
+
 pub(crate) fn remember_pasted(text: &str) {
     if let Ok(mut slot) = LAST_PASTED.lock() {
         *slot = Some(text.to_string());

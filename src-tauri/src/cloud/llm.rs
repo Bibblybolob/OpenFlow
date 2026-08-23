@@ -16,10 +16,15 @@ Rules:\n\
 - Use the preferred vocabulary exactly as given for names and terms.\n- Honor spoken emoji requests: \"insert party emoji\" appends 🎉 at that spot; without such a request, never add emojis.\n\
 - Never answer the content, never add information, never comment. Output ONLY the cleaned text.";
 
-pub fn polish(db: &Store, raw_text: &str, app_identifier: &str) -> Result<String> {
+pub fn polish(
+    db: &Store,
+    raw_text: &str,
+    app_identifier: &str,
+    context: Option<&str>,
+) -> Result<String> {
     let cfg = resolve_config(db)?;
     let style = resolve_style_instructions(db, app_identifier)?.unwrap_or_default();
-    let body = build_request_body(cfg.provider, &cfg.model, raw_text, &style, db)?;
+    let body = build_request_body(cfg.provider, &cfg.model, raw_text, &style, context, db)?;
 
     let req = match cfg.provider {
         Provider::OpenAi => super::http_client()?
@@ -169,9 +174,10 @@ pub fn build_request_body(
     model: &str,
     raw_text: &str,
     style_instructions: &str,
+    context: Option<&str>,
     db: &Store,
 ) -> Result<Value> {
-    let user_prompt = build_user_prompt(raw_text, style_instructions, db)?;
+    let user_prompt = build_user_prompt(raw_text, style_instructions, context, db)?;
     Ok(match provider {
         // OpenRouter speaks the OpenAI chat-completions dialect.
         Provider::OpenAi | Provider::OpenRouter => json!({
@@ -194,8 +200,20 @@ pub fn build_request_body(
     })
 }
 
-fn build_user_prompt(raw_text: &str, style_instructions: &str, db: &Store) -> Result<String> {
+fn build_user_prompt(
+    raw_text: &str,
+    style_instructions: &str,
+    context: Option<&str>,
+    db: &Store,
+) -> Result<String> {
     let mut prompt = String::new();
+
+    if let Some(ctx) = context.map(str::trim).filter(|c| !c.is_empty()) {
+        prompt.push_str(&format!(
+            "Text already before the cursor (continue it coherently — do not repeat or answer it): \n\"{}\"\n\n",
+            truncate(ctx, 400)
+        ));
+    }
 
     if !style_instructions.trim().is_empty() {
         prompt.push_str(&format!(
@@ -292,6 +310,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn context_block_is_inlined_when_present() {
+        let db = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let prompt = build_user_prompt(
+            "and then we shipped it",
+            "",
+            Some("Yesterday the team…"),
+            &db,
+        )
+        .unwrap();
+        assert!(prompt.contains("before the cursor"));
+        assert!(prompt.contains("Yesterday the team"));
+        // Absent context leaves no block behind.
+        let plain = build_user_prompt("hi", "", None, &db).unwrap();
+        assert!(!plain.contains("before the cursor"));
+    }
+
+    #[test]
     fn prompt_handles_backtracks_and_emoji_requests() {
         assert!(SYSTEM_PROMPT.contains("never mind"));
         assert!(SYSTEM_PROMPT.contains("final intent"));
@@ -306,7 +341,7 @@ mod tests {
     #[test]
     fn openai_body_shape() {
         let db = store();
-        let body = build_request_body(Provider::OpenAi, "gpt-x", "um hi", "", &db).unwrap();
+        let body = build_request_body(Provider::OpenAi, "gpt-x", "um hi", "", None, &db).unwrap();
         assert_eq!(body["model"], "gpt-x");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "Dictation:\num hi");
@@ -316,8 +351,15 @@ mod tests {
     #[test]
     fn anthropic_body_shape() {
         let db = store();
-        let body = build_request_body(Provider::Anthropic, "claude-x", "um hi", "Casual tone", &db)
-            .unwrap();
+        let body = build_request_body(
+            Provider::Anthropic,
+            "claude-x",
+            "um hi",
+            "Casual tone",
+            None,
+            &db,
+        )
+        .unwrap();
         assert_eq!(body["model"], "claude-x");
         assert_eq!(body["system"], SYSTEM_PROMPT);
         assert_eq!(body["messages"][0]["role"], "user");
@@ -333,7 +375,7 @@ mod tests {
         let db = store();
         db.add_dictionary_term("kubernetes", None).unwrap();
         db.add_snippet("my email", "jon@example.com").unwrap();
-        let prompt = build_user_prompt("hi", "", &db).unwrap();
+        let prompt = build_user_prompt("hi", "", None, &db).unwrap();
         assert!(prompt.contains("Preferred vocabulary: kubernetes"));
         assert!(prompt.contains("“my email”"));
     }
@@ -413,7 +455,7 @@ mod openrouter_tests {
     #[test]
     fn openrouter_body_uses_openai_shape() {
         let db = store();
-        let body = build_request_body(Provider::OpenRouter, "m/x", "hi", "", &db).unwrap();
+        let body = build_request_body(Provider::OpenRouter, "m/x", "hi", "", None, &db).unwrap();
         assert_eq!(body["model"], "m/x");
         assert_eq!(body["messages"][0]["role"], "system");
         assert!(body.get("max_tokens").is_none());

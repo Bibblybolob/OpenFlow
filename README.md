@@ -18,6 +18,8 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **Pluggable LLM providers** — bring an OpenAI, Claude, OpenRouter, or mix of keys; auto-detect or force a provider per your preference.
 - **Voice commands** — say "open youtube", "search rust async", or "copy …" to act instead of typing (toggleable).
 - **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct. Flow also **learns vocabulary on its own**: it diffs raw speech against the cleaned text, silently adopts recurring proper-noun fixes, and queues uncertain ones for one-click review on the Dictionary page.
+- **Cursor-context awareness** — dictation continues what you already wrote: cleanup sees the text before your caret and stitches itself in coherently.
+- **Streaming transcription** — cloud STT streams partial results into the pill during processing; you watch words appear rather than waiting blind.
 - **Backtrack handling & emoji commands** — mid-sentence "wait / actually / never mind" corrections collapse to your final intent, and spoken emoji requests ("insert party emoji") render the real thing.
 - **Per-app languages** — pin a transcription language to an app rule (e.g. Spanish in WhatsApp); it overrides the global setting for that app only.
 - **Quick style override** — right-click the pill to force a tone for this session (or back to per-app matching), without touching Settings.
@@ -61,14 +63,20 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 1. Hotkey down → frontmost app captured for style matching, mic stream opens.
 2. Hotkey up → audio is resampled to 16 kHz mono and encoded as WAV in memory.
 3. Transcription: OpenAI STT (gpt-4o-mini-transcribe by default — ~2x faster
-   than the full model at near-identical quality), OpenRouter audio model, or
-   on-device whisper.cpp (dictionary terms injected as a bias prompt).
-   Connections are pre-warmed at launch and stay warm between sessions, so no
-   TLS handshake is paid per dictation.
+   than the full model at near-identical quality) **streams server-sent
+   events**, so words render live in the pill while the request is still in
+   flight; OpenRouter audio models and on-device whisper.cpp emit their text
+   in one piece (dictionary terms injected as a bias prompt). Connections are
+   pre-warmed at launch and stay warm between sessions, so no TLS handshake
+   is paid per dictation.
 4. Snippet fast-path: exact trigger match expands locally, no LLM call.
 5. LLM cleanup polishes the text (skippable via Settings → Cleanup; short
    utterances under ~120 chars skip it automatically via "Fast path", and raw
    text is always the fallback if cleanup fails — you never lose a dictation).
+5b. Cursor context: while recording, the ~400 characters before your caret
+   are read in the background (macOS Accessibility); cleanup uses them to make
+   dictation *continue* the surrounding sentence coherently instead of landing
+   as an isolated fragment.
 6. Command mode check: recognized commands execute instead of pasting.
 7. Text is staged on the clipboard, Cmd+V synthesized natively via CGEvent
    (macOS) or SendInput Ctrl+V (Windows) into the target app, clipboard

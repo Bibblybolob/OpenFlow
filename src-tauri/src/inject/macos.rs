@@ -79,6 +79,36 @@ pub fn frontmost_app() -> String {
         .unwrap_or_default()
 }
 
+/// Reads up to ~400 characters immediately before the caret in the focused
+/// element, so cleanup can make dictation continue the surrounding sentence
+/// coherently. Best-effort: empty string whenever the frontmost app doesn't
+/// expose the Accessibility value (most non-text apps, browsers without
+/// AX enabled), or on any AppleScript hiccup.
+pub fn preceding_context() -> String {
+    let script = r#"
+        tell application "System Events"
+            tell (first process whose frontmost is true)
+                set fe to focused element
+                set docText to value of fe
+                set selRange to value of attribute "AXSelectedTextRange" of fe
+            end tell
+        end tell
+        set caretLoc to (first item of selRange) as integer
+        if caretLoc is 0 or length of docText is 0 then return ""
+        set maxStart to caretLoc - 400
+        if maxStart < 1 then set maxStart to 1
+        return text maxStart thru (caretLoc - 1) of docText
+    "#;
+    Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Pastes text at the current cursor location by placing it on the clipboard,
 /// synthesizing Cmd+V, then restoring the previous clipboard contents once
 /// the target app has read it.

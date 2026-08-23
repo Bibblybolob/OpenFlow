@@ -404,6 +404,7 @@ fn handler_loop(
                         fail(&app, &db, &state, format!("microphone unavailable: {e}"));
                         continue;
                     }
+                    crate::begin_context_capture();
                     mode = Mode::Ptt;
                     pending_tap = false;
                     session_gen.fetch_add(1, Ordering::Relaxed);
@@ -450,6 +451,7 @@ fn handler_loop(
                         audio.discard();
                         current_app = inject::frontmost_app();
                         audio.set_device(mic_preference(&db));
+                        crate::begin_context_capture();
                         if let Err(e) = audio.start() {
                             fail(&app, &db, &state, format!("microphone unavailable: {e}"));
                             mode = Mode::Idle;
@@ -558,6 +560,7 @@ fn handler_loop(
                     pending_start = false;
                     current_app = inject::frontmost_app();
                     audio.set_device(mic_preference(&db));
+                    crate::begin_context_capture();
                     if let Err(e) = audio.start() {
                         fail(&app, &db, &state, format!("microphone unavailable: {e}"));
                     } else {
@@ -718,8 +721,19 @@ pub(crate) fn run_session(
         .unwrap_or_else(|| "auto".to_string());
 
     // A failure at this stage keeps the audio around so it can be retried
-    // without re-recording; success clears any stale job.
-    let result = stt::transcribe(db, &recording.wav, &language, Some(&db_prompt(db)));
+    // without re-recording; success clears any stale job. Streaming deltas
+    // are forwarded to the pill as `stt-partial` (cumulative text) so the
+    // user watches words appear instead of staring at bouncing dots.
+    let partial_app = app.clone();
+    let result = stt::stream_transcribe(
+        db,
+        &recording.wav,
+        &language,
+        Some(&db_prompt(db)),
+        &mut |cumulative| {
+            let _ = partial_app.emit("stt-partial", serde_json::json!({ "text": cumulative }));
+        },
+    );
     let stt_started = timings.mark("wav-encode+prep", timings.started);
 
     let raw_text = match result {
@@ -755,8 +769,9 @@ pub(crate) fn run_session(
     // automatically for short utterances (cleanupSkipShort) since raw STT is
     // usually already clean there.
     let short = raw_text.chars().count() < SHORT_UTTERANCE_CHARS;
+    let caret_context = crate::take_caret_context();
     let polished = if cleanup_enabled(db) && !(short && cleanup_skip_short(db)) {
-        match llm::polish(db, &raw_text, &data.target_app) {
+        match llm::polish(db, &raw_text, &data.target_app, caret_context.as_deref()) {
             Ok(text) => text,
             Err(e) => {
                 eprintln!("cleanup skipped: {e}");
