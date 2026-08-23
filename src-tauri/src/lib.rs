@@ -650,7 +650,32 @@ fn load_hotkey_config(db: &Store) -> SharedHotkeyConfig {
             }
         }
     }
+    migrate_stale_f5_default(db, &mut config);
     Arc::new(RwLock::new(config))
+}
+
+/// One-time upgrade: installs built before the Right Shift default persisted
+/// `["F5"]`, and on modern MacBooks F5 is the mic/dictation key whose HID
+/// usage never surfaces as keyboard-F5 — the watcher reports ready while the
+/// key stays invisible. Migrate those to the current default once; users who
+/// deliberately re-pick F5 afterwards keep it.
+fn migrate_stale_f5_default(db: &Store, config: &mut HotkeyConfig) {
+    let already = db
+        .get_setting("hotkeyMigratedRightShift")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<bool>(&v).ok())
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    let _ = db.set_setting("hotkeyMigratedRightShift", &serde_json::json!(true));
+    let is_f5_only = config.keys.iter().all(|k| *k == device_query::Keycode::F5);
+    if !config.keys.is_empty() && is_f5_only && parse_key("F5").is_some() {
+        eprintln!("hotkey: migrating stale default F5 -> Right Shift");
+        config.keys = vec![device_query::Keycode::RShift];
+        let _ = db.set_setting("hotkeyKeys", &serde_json::json!(["Right Shift"]));
+    }
 }
 
 /// Maps a persisted hotkey name onto this platform's KEY_TABLE. Handles

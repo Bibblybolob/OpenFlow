@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/ipc";
 import type { Stats, Transcript } from "../../lib/types";
 
@@ -17,6 +18,7 @@ export default function Home() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [query, setQuery] = useState("");
+  const [watcher, setWatcher] = useState("waiting-permissions");
 
   async function refresh() {
     setStats(await api.stats());
@@ -25,7 +27,18 @@ export default function Home() {
 
   useEffect(() => {
     refresh();
+    api
+      .hotkeyWatcherStatus()
+      .then(setWatcher)
+      .catch(() => {});
+    let unlisten: (() => void) | undefined;
+    listen<string>("hotkey-status", (e) => setWatcher(e.payload)).then(
+      (fn) => (unlisten = fn),
+    );
+    return () => unlisten?.();
   }, []);
+
+  const watcherReady = watcher === "ready";
 
   async function onSearch(q: string) {
     setQuery(q);
@@ -62,6 +75,28 @@ export default function Home() {
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
+      {!watcherReady && (
+        <button
+          onClick={() => {
+            api.openInputMonitoringSettings().catch(() => {});
+          }}
+          className="flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-left transition hover:bg-amber-500/[0.16]"
+        >
+          <span>
+            <span className="block text-sm font-medium text-amber-200">
+              {watcher === "waiting-permissions"
+                ? "Hotkey inactive — grant Input Monitoring"
+                : "Hotkey inactive — watcher unavailable"}
+            </span>
+            <span className="mt-0.5 block text-xs text-amber-200/70">
+              {watcher === "waiting-permissions"
+                ? "Click to open System Settings, add FlowClone, then relaunch the app"
+                : watcher}
+            </span>
+          </span>
+          <span className="text-xs font-medium text-amber-300">Fix →</span>
+        </button>
+      )}
       <div className="rounded-xl border border-white/5 bg-gradient-to-br from-indigo-500/[0.07] to-violet-500/[0.04] px-5 py-4">
         <p className="text-sm font-medium text-neutral-100">Speak naturally</p>
         <p className="mt-1 text-xs leading-relaxed text-neutral-400">

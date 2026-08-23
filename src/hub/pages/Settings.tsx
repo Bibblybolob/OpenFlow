@@ -374,6 +374,12 @@ export default function Settings({
             onChange={changeLanguage}
           />
         </div>
+        {hotkey.includes("F5") && (
+          <p className="text-xs text-amber-500">
+            F5 is the mic/dictation key on many Mac keyboards — macOS sends it
+            as a special key that FlowClone cannot see. Pick another key.
+          </p>
+        )}
         <SelectRow
           label="Microphone"
           value={mic}
