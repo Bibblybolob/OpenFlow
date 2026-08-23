@@ -57,6 +57,19 @@ pub struct Snippet {
     pub created_at: String,
 }
 
+/// A vocabulary candidate detected automatically from dictation diffs.
+/// Pending rows surface in the Dictionary page for one-click review;
+/// accepted/dismissed rows are kept to avoid re-suggesting the same term.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VocabSuggestion {
+    pub id: i64,
+    pub raw_form: String,
+    pub term: String,
+    pub occurrences: i64,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Style {
@@ -107,6 +120,15 @@ CREATE TABLE IF NOT EXISTS snippets (
     trigger    TEXT NOT NULL COLLATE NOCASE UNIQUE,
     body       TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS vocab_suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_form    TEXT NOT NULL,
+    term        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    occurrences INTEGER NOT NULL DEFAULT 1,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS styles (
@@ -301,6 +323,102 @@ impl Store {
         Ok(())
     }
 
+    /// Case-insensitive check whether a term is already in the dictionary.
+    pub fn dictionary_contains(&self, term: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let hit = conn
+            .query_row(
+                "SELECT 1 FROM dictionary WHERE term = ?1 COLLATE NOCASE",
+                params![term.trim()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(hit.is_some())
+    }
+
+    /// Silently adds a learned term to the dictionary. Existing entries are
+    /// left untouched so manual replacements are never overwritten.
+    pub fn auto_learn_term(&self, term: &str) -> Result<()> {
+        let term = term.trim();
+        if term.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dictionary (term) VALUES (?1)
+             ON CONFLICT(term) DO NOTHING",
+            params![term],
+        )?;
+        Ok(())
+    }
+
+    /// Records a low-confidence vocabulary candidate. Repeat sightings bump
+    /// the occurrence counter; dismissed suggestions stay dismissed.
+    pub fn record_vocab_suggestion(&self, raw_form: &str, term: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO vocab_suggestions (raw_form, term) VALUES (?1, ?2)
+             ON CONFLICT(term) DO UPDATE SET occurrences = occurrences + 1",
+            params![raw_form.trim(), term.trim()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_vocab_suggestions(&self) -> Result<Vec<VocabSuggestion>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, raw_form, term, occurrences, created_at
+             FROM vocab_suggestions WHERE status = 'pending'
+             ORDER BY occurrences DESC, id DESC LIMIT 200",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(VocabSuggestion {
+                id: row.get(0)?,
+                raw_form: row.get(1)?,
+                term: row.get(2)?,
+                occurrences: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.map(|r| r.map_err(StoreError::from)).collect()
+    }
+
+    /// Promotes a suggestion into the dictionary and marks it accepted.
+    pub fn accept_vocab_suggestion(&self, id: i64) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let term: Option<String> = conn
+            .query_row(
+                "SELECT term FROM vocab_suggestions WHERE id = ?1 AND status = 'pending'",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(term) = term else {
+            return Ok(());
+        };
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO dictionary (term) VALUES (?1)
+             ON CONFLICT(term) DO NOTHING",
+            params![term],
+        )?;
+        tx.execute(
+            "UPDATE vocab_suggestions SET status = 'accepted' WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn dismiss_vocab_suggestion(&self, id: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE vocab_suggestions SET status = 'dismissed'
+             WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn add_snippet(&self, trigger: &str, body: &str) -> Result<Snippet> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -373,14 +491,17 @@ impl Store {
         rows.map(|r| r.map_err(StoreError::from)).collect()
     }
 
+    /// Resolves the style instructions for a frontmost app. Among all enabled
+    /// patterns contained in the identifier, the most specific (longest) wins,
+    /// e.g. "com.apple.mail" beats "mail".
     pub fn resolve_style_for_app(&self, app_identifier: &str) -> Result<Option<String>> {
         let needle = app_identifier.to_lowercase();
         let all = self.list_styles()?;
         Ok(all
             .iter()
             .filter(|s| s.enabled && !s.app_pattern.is_empty() && needle.contains(&s.app_pattern))
-            .map(|s| s.instructions.clone())
-            .next())
+            .max_by_key(|s| s.app_pattern.len())
+            .map(|s| s.instructions.clone()))
     }
 
     pub fn set_style_enabled(&self, id: i64, enabled: bool) -> Result<()> {
@@ -578,6 +699,92 @@ mod tests {
             store.resolve_style_for_app("com.slack.Slack").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn style_most_specific_pattern_wins() {
+        let store = memory_store();
+        store
+            .upsert_style("mail", "Mail generic", "Generic tone")
+            .unwrap();
+        store
+            .upsert_style("com.apple.mail", "Apple Mail", "Apple-specific tone")
+            .unwrap();
+        assert_eq!(
+            store
+                .resolve_style_for_app("com.apple.mail")
+                .unwrap()
+                .as_deref(),
+            Some("Apple-specific tone")
+        );
+        // Substring semantics: the pattern "mail" does not occur inside
+        // Thunderbird's identifier, so nothing matches there.
+        assert_eq!(
+            store
+                .resolve_style_for_app("org.mozilla.thunderbird")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn vocab_suggestion_upsert_counts_occurrences() {
+        let store = memory_store();
+        store
+            .record_vocab_suggestion("john smyth", "John Smythe")
+            .unwrap();
+        store
+            .record_vocab_suggestion("jon smythe", "John Smythe")
+            .unwrap();
+        let list = store.list_vocab_suggestions().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].term, "John Smythe");
+        assert_eq!(list[0].occurrences, 2);
+    }
+
+    #[test]
+    fn accept_moves_suggestion_into_dictionary() {
+        let store = memory_store();
+        store
+            .record_vocab_suggestion("kubernets", "Kubernetes")
+            .unwrap();
+        let id = store.list_vocab_suggestions().unwrap()[0].id;
+        store.accept_vocab_suggestion(id).unwrap();
+        assert!(store.dictionary_contains("kubernetes").unwrap());
+        assert!(store.list_vocab_suggestions().unwrap().is_empty());
+
+        // Accepted terms are never re-suggested.
+        store
+            .record_vocab_suggestion("kubernets", "Kubernetes")
+            .unwrap();
+        assert!(store.list_vocab_suggestions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismiss_keeps_term_dismissed() {
+        let store = memory_store();
+        store.record_vocab_suggestion("acme", "ACME").unwrap();
+        let id = store.list_vocab_suggestions().unwrap()[0].id;
+        store.dismiss_vocab_suggestion(id).unwrap();
+        assert!(!store.dictionary_contains("ACME").unwrap());
+        // Repeated sightings must not resurrect a dismissed suggestion.
+        store.record_vocab_suggestion("acme", "ACME").unwrap();
+        assert!(store.list_vocab_suggestions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn auto_learn_is_idempotent_and_preserves_manual_entries() {
+        let store = memory_store();
+        store
+            .add_dictionary_term("smythe", Some("Smythe & Co"))
+            .unwrap();
+        store.auto_learn_term("SMYTHE").unwrap();
+        store.auto_learn_term("").unwrap();
+        let list = store.list_dictionary().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].replacement.as_deref(), Some("Smythe & Co"));
+        store.auto_learn_term("Brand New Term").unwrap();
+        assert!(store.dictionary_contains("brand new term").unwrap());
     }
 
     #[test]

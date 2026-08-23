@@ -1,12 +1,14 @@
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Sample;
 use thiserror::Error;
+
+/// Upload sample rate. Speech STT models operate at 16 kHz natively; feeding
+/// them resampled mono audio cuts the payload ~3x versus 48 kHz with no
+/// transcription quality loss.
+const TARGET_SAMPLE_RATE: u32 = 16_000;
 
 #[derive(Debug, Error)]
 pub enum AudioError {
@@ -23,6 +25,13 @@ pub enum AudioError {
 struct Shared {
     samples: Vec<f32>,
     sample_rate: u32,
+}
+
+/// A finished dictation capture, ready for upload.
+pub struct Recording {
+    pub duration_ms: i64,
+    /// Mono 16 kHz 16-bit PCM WAV, held in memory (no temp file).
+    pub wav: Vec<u8>,
 }
 
 pub struct AudioEngine {
@@ -132,10 +141,10 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Stops capture; writes captured audio as 16-bit PCM WAV to `path`.
-    /// Returns the session duration in milliseconds, or `None` for taps too
-    /// short to be a real dictation.
-    pub fn stop(&mut self, path: &Path) -> Result<Option<i64>, AudioError> {
+    /// Stops capture and encodes the audio in memory as a mono 16 kHz 16-bit
+    /// PCM WAV, ready to upload. Returns `None` for taps too short to be a
+    /// real dictation.
+    pub fn stop(&mut self) -> Result<Option<Recording>, AudioError> {
         if let Some(stream) = self.stream.take() {
             drop(stream);
         }
@@ -143,10 +152,11 @@ impl AudioEngine {
             Some(t) => t,
             None => return Ok(None),
         };
-        let mut shared = self.shared.lock().unwrap();
-        let samples = std::mem::take(&mut shared.samples);
-        let sample_rate = shared.sample_rate;
-        drop(shared);
+        let (samples, capture_rate) = {
+            let mut shared = self.shared.lock().unwrap();
+            let samples = std::mem::take(&mut shared.samples);
+            (samples, shared.sample_rate)
+        };
 
         let elapsed_ms = started_at.elapsed().as_millis() as i64;
         // Ignore accidental taps shorter than ~250ms.
@@ -154,8 +164,11 @@ impl AudioEngine {
             return Ok(None);
         }
 
-        encode_wav(&samples, sample_rate, path)?;
-        Ok(Some(elapsed_ms))
+        let wav = encode_wav(&resample_to_16k(&samples, capture_rate), TARGET_SAMPLE_RATE)?;
+        Ok(Some(Recording {
+            duration_ms: elapsed_ms,
+            wav,
+        }))
     }
 
     /// Stops capture and throws the audio away (Esc-cancel).
@@ -219,36 +232,73 @@ fn push_levelled(
     }
 }
 
-fn encode_wav(samples: &[f32], sample_rate: u32, path: &Path) -> Result<(), hound::Error> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let file = File::create(path)?;
-    let mut writer = hound::WavWriter::new(BufWriter::new(file), spec)?;
+/// Resamples mono audio to 16 kHz. Integer-rate inputs (48k, 44.1k is not —
+/// handled by linear path) use average pooling, which doubles as a crude
+/// anti-alias filter; other rates fall back to linear interpolation.
+fn resample_to_16k(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if sample_rate == TARGET_SAMPLE_RATE || samples.is_empty() {
+        return samples.to_vec();
+    }
+    if sample_rate.is_multiple_of(TARGET_SAMPLE_RATE) {
+        let factor = (sample_rate / TARGET_SAMPLE_RATE) as usize;
+        return samples
+            .chunks(factor)
+            .map(|chunk| chunk.iter().sum::<f32>() / chunk.len() as f32)
+            .collect();
+    }
+    let ratio = f64::from(sample_rate) / f64::from(TARGET_SAMPLE_RATE);
+    let out_len = (samples.len() as f64 / ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f64 * ratio;
+        let idx = pos as usize;
+        let frac = (pos - idx as f64) as f32;
+        let s0 = samples[idx];
+        let s1 = samples.get(idx + 1).copied().unwrap_or(s0);
+        out.push(s0 + (s1 - s0) * frac);
+    }
+    out
+}
+
+/// Encodes mono samples as a 16-bit PCM WAV held entirely in memory.
+/// The 44-byte RIFF header is written directly — cheaper than routing
+/// through a writer abstraction for what is a fixed-layout buffer.
+fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, hound::Error> {
+    let mut out = Vec::with_capacity(44 + samples.len() * 2);
+    let data_len = (samples.len() * 2) as u32;
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
-        writer.write_sample((clamped * i16::MAX as f32) as i16)?;
+        let v = (clamped * i16::MAX as f32) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
     }
-    writer.finalize()?;
-    Ok(())
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
-    fn wav_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("flowclone-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.wav");
+    fn wav_roundtrip_in_memory() {
         let samples: Vec<f32> = (0..4_800).map(|i| ((i as f32) / 100.0).sin()).collect();
-        encode_wav(&samples, 48_000, &path).unwrap();
+        let bytes = encode_wav(&samples, 48_000).unwrap();
+        assert!(bytes.len() > 44, "wav payload missing");
 
-        let mut reader = hound::WavReader::open(&path).unwrap();
+        let mut reader = hound::WavReader::new(Cursor::new(&bytes)).unwrap();
         assert_eq!(reader.spec().sample_rate, 48_000);
         assert_eq!(reader.spec().channels, 1);
         assert_eq!(reader.spec().sample_format, hound::SampleFormat::Int);
@@ -259,6 +309,33 @@ mod tests {
             .collect();
         assert_eq!(decoded.len(), samples.len());
         assert!((decoded[0] - samples[0]).abs() < 0.001);
-        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resample_integer_factor_average_pools() {
+        // 3x decimation: each output sample is the mean of three inputs.
+        let input: Vec<f32> = vec![0.0, 0.3, 0.6, 0.9, 1.2, 1.5];
+        let out = resample_to_16k(&input, 48_000);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.3).abs() < 1e-6);
+        assert!((out[1] - 1.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resample_linear_path_handles_44k() {
+        let input: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.01).sin()).collect();
+        let out = resample_to_16k(&input, 44_100);
+        // ~16000 output frames with a small floor-truncation margin.
+        assert!((out.len() as i64 - 16_000).abs() < 10);
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "resampler produced NaN/inf"
+        );
+    }
+
+    #[test]
+    fn resample_passthrough_at_target_rate() {
+        let input: Vec<f32> = vec![0.1, -0.2, 0.3];
+        assert_eq!(resample_to_16k(&input, 16_000), input);
     }
 }

@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Result, Store, StoreError};
@@ -21,6 +19,7 @@ use base64::Engine as _;
 enum SttProvider {
     OpenAi,
     OpenRouter,
+    Local,
 }
 
 impl SttProvider {
@@ -33,6 +32,7 @@ impl SttProvider {
             .as_deref()
         {
             Some("openrouter") => SttProvider::OpenRouter,
+            Some("local") => SttProvider::Local,
             _ => SttProvider::OpenAi,
         }
     }
@@ -43,15 +43,18 @@ const DEFAULT_OPENROUTER_STT_MODEL: &str = "thinkingmachines/inkling-small:free"
 
 pub fn transcribe(
     db: &Store,
-    audio: &Path,
+    wav_bytes: &[u8],
     language: &str,
     prompt: Option<&str>,
 ) -> Result<TranscriptionResult> {
     let provider = SttProvider::resolve(db);
     let model = stt_model(db, provider);
     let text = match provider {
-        SttProvider::OpenAi => transcribe_openai(db, audio, &model, language, prompt)?,
-        SttProvider::OpenRouter => transcribe_openrouter(db, audio, &model, language, prompt)?,
+        SttProvider::Local => {
+            return super::local_stt::transcribe_local(db, wav_bytes, language, prompt);
+        }
+        SttProvider::OpenAi => transcribe_openai(db, wav_bytes, &model, language, prompt)?,
+        SttProvider::OpenRouter => transcribe_openrouter(db, wav_bytes, &model, language, prompt)?,
     };
     if text.trim().is_empty() {
         return Err(StoreError::Other(
@@ -72,15 +75,10 @@ fn stt_model(db: &Store, provider: SttProvider) -> String {
         .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| match provider {
             SttProvider::OpenAi => DEFAULT_OPENAI_STT_MODEL.to_string(),
-            SttProvider::OpenRouter => DEFAULT_OPENROUTER_STT_MODEL.to_string(),
+            SttProvider::OpenRouter | SttProvider::Local => {
+                DEFAULT_OPENROUTER_STT_MODEL.to_string()
+            }
         })
-}
-
-fn http_client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| StoreError::Other(e.to_string()))
 }
 
 fn openrouter_key(db: &Store) -> Result<String> {
@@ -106,7 +104,7 @@ fn openrouter_key(db: &Store) -> Result<String> {
 
 fn transcribe_openai(
     db: &Store,
-    audio: &Path,
+    wav_bytes: &[u8],
     model: &str,
     language: &str,
     prompt: Option<&str>,
@@ -121,8 +119,7 @@ fn transcribe_openai(
         ));
     }
 
-    let bytes = std::fs::read(audio)?;
-    let part = reqwest::blocking::multipart::Part::bytes(bytes)
+    let part = reqwest::blocking::multipart::Part::bytes(wav_bytes.to_vec())
         .file_name("audio.wav")
         .mime_str("audio/wav")
         .map_err(|e| StoreError::Other(e.to_string()))?;
@@ -141,7 +138,7 @@ fn transcribe_openai(
         }
     }
 
-    let resp = http_client()?
+    let resp = super::http_client()?
         .post("https://api.openai.com/v1/audio/transcriptions")
         .bearer_auth(&api_key)
         .multipart(form)
@@ -167,14 +164,13 @@ fn transcribe_openai(
 
 fn transcribe_openrouter(
     db: &Store,
-    audio: &Path,
+    wav_bytes: &[u8],
     model: &str,
     language: &str,
     prompt: Option<&str>,
 ) -> Result<String> {
     let api_key = openrouter_key(db)?;
-    let wav = std::fs::read(audio)?;
-    let b64 = B64.encode(wav);
+    let b64 = B64.encode(wav_bytes);
 
     let mut content =
         String::from("Transcribe this audio verbatim. Output only the transcript, no commentary.");
@@ -199,7 +195,7 @@ fn transcribe_openrouter(
         }]
     });
 
-    let resp = http_client()?
+    let resp = super::http_client()?
         .post("https://openrouter.ai/api/v1/chat/completions")
         .bearer_auth(&api_key)
         .header("HTTP-Referer", "https://flowclone.app")
@@ -311,9 +307,7 @@ mod tests {
         let db = Store::open(std::path::Path::new(":memory:")).unwrap();
         db.set_setting("openaiApiKey", &serde_json::json!("sk-or-v1-test"))
             .unwrap();
-        let err = transcribe(&db, std::path::Path::new("/nonexistent"), "en", None)
-            .unwrap_err()
-            .to_string();
+        let err = transcribe(&db, b"", "en", None).unwrap_err().to_string();
         assert!(err.contains("OpenRouter"), "unexpected error: {err}");
     }
 

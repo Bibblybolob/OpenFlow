@@ -69,14 +69,30 @@ pub struct HotkeyConfig {
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
+        // Right Shift sits under both palms on every keyboard, never types a
+        // character when tapped alone, and — unlike F5 on recent MacBooks —
+        // is never intercepted by a macOS system feature.
         Self {
-            keys: vec![Keycode::F5],
+            keys: vec![Keycode::RShift],
             tap_ms: 250,
         }
     }
 }
 
 pub type SharedHotkeyConfig = Arc<RwLock<HotkeyConfig>>;
+
+/// Lifecycle of the keyboard backend, reported to the UI so a dead hotkey
+/// can never be silent again.
+#[derive(Debug, Clone)]
+pub enum WatcherStatus {
+    /// Keyboard backend opened; keystrokes are being watched.
+    Ready,
+    /// Backend creation failed (typically permissions revoked mid-flight).
+    /// The payload explains why; the watcher keeps retrying.
+    Unavailable(String),
+}
+
+pub type StatusCallback = Arc<dyn Fn(WatcherStatus) + Send + Sync>;
 
 pub trait HotkeyWatcher: Send {
     fn spawn(self, tx: Sender<HotkeyEvent>) -> thread::JoinHandle<()>;
@@ -85,10 +101,26 @@ pub trait HotkeyWatcher: Send {
 /// Push-to-talk watcher. Reads the shared config every tick so hotkey
 /// changes apply without a restart. Fires Down when all configured keys are
 /// held; on release distinguishes quick taps (TapUp) from real holds (Up).
-#[derive(Debug, Clone)]
+///
+/// If the keyboard backend cannot be created (macOS revokes Input Monitoring
+/// whenever the app bundle is replaced), the watcher reports
+/// [`WatcherStatus::Unavailable`] and retries every few seconds instead of
+/// dying permanently — granting the permission back is enough to recover
+/// without a relaunch.
+#[derive(Clone)]
 pub struct PushToTalkWatcher {
     pub config: SharedHotkeyConfig,
     pub poll_interval_ms: u64,
+    pub on_status: Option<StatusCallback>,
+}
+
+impl std::fmt::Debug for PushToTalkWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushToTalkWatcher")
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("on_status", &self.on_status.is_some())
+            .finish()
+    }
 }
 
 impl Default for PushToTalkWatcher {
@@ -96,21 +128,33 @@ impl Default for PushToTalkWatcher {
         Self {
             config: Arc::new(RwLock::new(HotkeyConfig::default())),
             poll_interval_ms: 20,
+            on_status: None,
         }
     }
 }
 
+const WATCHER_RETRY_MS: u64 = 3000;
+
 impl HotkeyWatcher for PushToTalkWatcher {
     fn spawn(self, tx: Sender<HotkeyEvent>) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            let device =
+            let device = loop {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(DeviceState::new)) {
-                    Ok(d) => d,
+                    Ok(d) => break d,
                     Err(_) => {
-                        eprintln!("hotkey watcher unavailable: missing accessibility permission");
-                        return;
+                        let reason =
+                            "keyboard backend unavailable — re-grant Input Monitoring".to_string();
+                        eprintln!("hotkey watcher unavailable: {reason}; retrying in {WATCHER_RETRY_MS}ms");
+                        if let Some(cb) = &self.on_status {
+                            cb(WatcherStatus::Unavailable(reason));
+                        }
+                        thread::sleep(Duration::from_millis(WATCHER_RETRY_MS));
                     }
                 };
+            };
+            if let Some(cb) = &self.on_status {
+                cb(WatcherStatus::Ready);
+            }
             let mut held = false;
             let mut held_since = Instant::now();
             loop {

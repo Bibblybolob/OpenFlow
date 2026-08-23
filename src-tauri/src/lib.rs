@@ -3,6 +3,7 @@ mod cloud;
 mod commands;
 mod hotkey;
 mod inject;
+mod learn;
 mod pipeline;
 mod store;
 
@@ -10,7 +11,7 @@ use std::fs;
 use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 
 use hotkey::{key_name, key_options, parse_key, HotkeyConfig, SharedHotkeyConfig};
@@ -21,6 +22,7 @@ pub struct AppState {
     db: Arc<Store>,
     pipeline: Pipeline,
     hotkey: SharedHotkeyConfig,
+    watcher_status: Arc<RwLock<String>>,
 }
 
 fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
@@ -151,6 +153,23 @@ fn delete_dictionary_term(state: tauri::State<AppState>, id: i64) -> store::Resu
 }
 
 #[tauri::command]
+fn list_vocab_suggestions(
+    state: tauri::State<AppState>,
+) -> store::Result<Vec<store::VocabSuggestion>> {
+    with_db(&state, |db| db.list_vocab_suggestions())
+}
+
+#[tauri::command]
+fn accept_vocab_suggestion(state: tauri::State<AppState>, id: i64) -> store::Result<()> {
+    with_db(&state, |db| db.accept_vocab_suggestion(id))
+}
+
+#[tauri::command]
+fn dismiss_vocab_suggestion(state: tauri::State<AppState>, id: i64) -> store::Result<()> {
+    with_db(&state, |db| db.dismiss_vocab_suggestion(id))
+}
+
+#[tauri::command]
 fn add_snippet(
     state: tauri::State<AppState>,
     trigger: String,
@@ -219,6 +238,14 @@ fn set_setting(state: tauri::State<AppState>, key: String, value: Value) -> stor
 #[tauri::command]
 fn pipeline_status(state: tauri::State<AppState>) -> pipeline::PipelineState {
     state.pipeline.current()
+}
+
+/// Last reported hotkey-watcher lifecycle state: "waiting-permissions",
+/// "ready", or "unavailable:<reason>". Queryable so the Hub shows the truth
+/// even if it opened after the events fired.
+#[tauri::command]
+fn hotkey_watcher_status(state: tauri::State<AppState>) -> String {
+    state.watcher_status.read().unwrap().clone()
 }
 
 #[tauri::command]
@@ -297,6 +324,50 @@ fn check_mic_permission() -> store::Result<bool> {
             "microphone unavailable: {e} — check permission in System Settings"
         ))),
     }
+}
+
+/// Catalog of on-device transcription models with download status.
+#[tauri::command]
+fn local_model_status() -> Vec<serde_json::Value> {
+    use cloud::local_stt::{is_downloaded, LOCAL_MODELS};
+    LOCAL_MODELS
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "label": m.label,
+                "approxMb": m.approx_mb,
+                "downloaded": is_downloaded(m.id),
+            })
+        })
+        .collect()
+}
+
+/// Downloads an on-device model, streaming progress to the Hub. Runs on its
+/// own thread so the UI stays responsive.
+#[tauri::command]
+fn download_local_model(app: tauri::AppHandle, model: String) -> Result<(), String> {
+    std::thread::spawn(move || {
+        if let Err(e) = cloud::local_stt::download_model(&app, &model) {
+            eprintln!("model download failed: {e}");
+            let _ = app.emit(
+                "local-model-progress",
+                serde_json::json!({
+                    "type": "error",
+                    "model": model,
+                    "message": e.to_string(),
+                }),
+            );
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn set_local_model(state: tauri::State<AppState>, model: String) -> store::Result<()> {
+    with_db(&state, |db| {
+        db.set_setting("sttLocalModel", &serde_json::json!(model))
+    })
 }
 
 #[tauri::command]
@@ -480,15 +551,22 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
+            cloud::local_stt::init_models_dir(dir.join("models"));
             let db = Arc::new(Store::open(&dir.join("flowclone.db"))?);
             let hotkey = load_hotkey_config(&db);
             create_flowbar(app.handle(), &db)?;
-            let pipeline =
-                Pipeline::start(app.handle().clone(), Arc::clone(&db), Arc::clone(&hotkey));
+            let watcher_status = Arc::new(RwLock::new("waiting-permissions".to_string()));
+            let pipeline = Pipeline::start(
+                app.handle().clone(),
+                Arc::clone(&db),
+                Arc::clone(&hotkey),
+                Arc::clone(&watcher_status),
+            );
             app.manage(AppState {
                 db,
                 pipeline,
                 hotkey,
+                watcher_status,
             });
             Ok(())
         })
@@ -503,6 +581,9 @@ pub fn run() {
             list_dictionary,
             set_dictionary_starred,
             delete_dictionary_term,
+            list_vocab_suggestions,
+            accept_vocab_suggestion,
+            dismiss_vocab_suggestion,
             add_snippet,
             list_snippets,
             delete_snippet,
@@ -514,6 +595,7 @@ pub fn run() {
             get_setting,
             set_setting,
             pipeline_status,
+            hotkey_watcher_status,
             toggle_recording,
             cancel_recording,
             get_hotkey,
@@ -529,7 +611,10 @@ pub fn run() {
             accessibility_status,
             input_monitoring_status,
             open_accessibility_settings,
-            open_input_monitoring_settings
+            open_input_monitoring_settings,
+            local_model_status,
+            download_local_model,
+            set_local_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,12 +8,31 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioEngine;
 use crate::cloud::{llm, stt};
-use crate::hotkey::{HotkeyEvent, HotkeyWatcher, PushToTalkWatcher, SharedHotkeyConfig};
+use crate::hotkey::{
+    HotkeyEvent, HotkeyWatcher, PushToTalkWatcher, SharedHotkeyConfig, WatcherStatus,
+};
 use crate::inject;
 use crate::store::{Store, Transcript};
 
 const MAX_SESSION_SECS: u64 = 360;
 const DOUBLE_TAP_WINDOW_MS: u64 = 700;
+
+/// Broadcasts hotkey-watcher lifecycle to the webviews so the Hub can show
+/// "waiting for permission / ready / unavailable" instead of a silent dead
+/// hotkey. Also mirrored into stderr for headless debugging.
+pub(crate) fn emit_hotkey_status(app: &AppHandle, status: &str, detail: Option<String>) {
+    eprintln!(
+        "hotkey watcher: {status}{}",
+        detail
+            .as_deref()
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default()
+    );
+    let _ = app.emit(
+        "hotkey-status",
+        serde_json::json!({ "status": status, "detail": detail }),
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +79,9 @@ pub struct PipelineEvent {
 enum Msg {
     Hotkey(HotkeyEvent),
     Cancel,
+    /// Sent by the worker thread once post-processing (STT/LLM/inject)
+    /// completes, so the hotkey handler can accept new dictations again.
+    SessionDone,
 }
 
 pub struct Pipeline {
@@ -69,35 +90,53 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn start(app: AppHandle, db: Arc<Store>, hotkey_config: SharedHotkeyConfig) -> Self {
+    pub fn start(
+        app: AppHandle,
+        db: Arc<Store>,
+        hotkey_config: SharedHotkeyConfig,
+        watcher_status: std::sync::Arc<std::sync::RwLock<String>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel::<Msg>();
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
         {
-            // Permissions can be granted at any time (and are silently
-            // revoked when the app bundle is replaced), so poll until both
-            // gates open: Accessibility (paste) and Input Monitoring
-            // (reading global keystrokes for the hotkey).
+            // Input Monitoring can be granted at any time (and is silently
+            // revoked when the app bundle is replaced), so poll until the
+            // gate opens. Accessibility is deliberately NOT required here:
+            // recording and transcription work without it, and a missing
+            // Accessibility grant surfaces as a clear error at paste time.
             let config = Arc::clone(&hotkey_config);
+            let status_app = app.clone();
+            let status_cell = Arc::clone(&watcher_status);
             std::thread::spawn(move || {
                 let mut announced = false;
                 loop {
-                    if inject::is_accessibility_trusted() && inject::is_listen_event_trusted() {
+                    if inject::is_listen_event_trusted() {
                         break;
                     }
                     if !announced {
-                        eprintln!(
-                            "dictation idle: waiting for Accessibility + Input Monitoring permission…"
-                        );
+                        *status_cell.write().unwrap() = "waiting-permissions".to_string();
+                        emit_hotkey_status(&status_app, "waiting-permissions", None);
                         announced = true;
                     }
                     std::thread::sleep(Duration::from_secs(2));
                 }
-                eprintln!("permissions granted — hotkey watcher starting");
+                eprintln!("Input Monitoring granted — hotkey watcher starting");
+                let status_cell = Arc::clone(&status_cell);
                 PushToTalkWatcher {
                     config,
                     poll_interval_ms: 20,
+                    on_status: Some(Arc::new(move |status| match status {
+                        WatcherStatus::Ready => {
+                            *status_cell.write().unwrap() = "ready".to_string();
+                            emit_hotkey_status(&status_app, "ready", None);
+                        }
+                        WatcherStatus::Unavailable(reason) => {
+                            *status_cell.write().unwrap() = format!("unavailable:{reason}");
+                            emit_hotkey_status(&status_app, "unavailable", Some(reason));
+                        }
+                    })),
                 }
                 .spawn(hk_tx);
             });
@@ -273,6 +312,11 @@ fn handler_loop(
     let mut mode = Mode::Idle;
     let mut pending_tap = false;
     let mut first_tap_at: Option<Instant> = None;
+    // True while a worker thread is post-processing a finished recording.
+    // The hotkey handler stays responsive during that window and queues one
+    // start request instead of blocking like the old synchronous flow.
+    let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut pending_start = false;
     {
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -292,8 +336,17 @@ fn handler_loop(
         match msg {
             Msg::Hotkey(HotkeyEvent::Down) => {
                 if mode == Mode::Idle {
+                    if busy.load(Ordering::Relaxed) {
+                        // Previous dictation still processing — queue a
+                        // start for when the worker finishes.
+                        pending_start = true;
+                        continue;
+                    }
                     current_app = inject::frontmost_app();
-                    if audio.start().is_err() {
+                    if let Err(e) = audio.start() {
+                        // Never swallow this: a dead mic must look different
+                        // from a dead hotkey, or users cannot tell them apart.
+                        fail(&app, &db, &state, format!("microphone unavailable: {e}"));
                         continue;
                     }
                     mode = Mode::Ptt;
@@ -306,13 +359,23 @@ fn handler_loop(
             }
             Msg::Hotkey(HotkeyEvent::Up) => {
                 if mode != Mode::Idle {
-                    finish_session(&app, &db, &state, &mut audio, &mut current_app);
+                    finish_session(
+                        &app,
+                        &db,
+                        &state,
+                        &mut audio,
+                        &mut current_app,
+                        &busy,
+                        &timer_tx,
+                    );
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
-                } else {
+                } else if !pending_start {
                     transition(&app, &db, &state, PipelineState::Idle, None, None);
                 }
+                // Up while a queued start is pending: the eventual session
+                // will be a sub-250ms tap and gets discarded on its own.
             }
             Msg::Hotkey(HotkeyEvent::TapUp) => match mode {
                 Mode::Ptt => {
@@ -329,13 +392,13 @@ fn handler_loop(
                         // go hands-free.
                         audio.discard();
                         current_app = inject::frontmost_app();
-                        if audio.start().is_ok() {
+                        if let Err(e) = audio.start() {
+                            fail(&app, &db, &state, format!("microphone unavailable: {e}"));
+                            mode = Mode::Idle;
+                        } else {
                             mode = Mode::HandsFree;
                             pending_tap = false;
                             spawn_max_session_timer(&timer_tx);
-                        } else {
-                            fail(&app, &db, &state, "microphone unavailable".to_string());
-                            mode = Mode::Idle;
                         }
                     } else {
                         // Slow second tap — treat as hands-free entry too
@@ -345,7 +408,15 @@ fn handler_loop(
                     }
                 }
                 Mode::HandsFree => {
-                    finish_session(&app, &db, &state, &mut audio, &mut current_app);
+                    finish_session(
+                        &app,
+                        &db,
+                        &state,
+                        &mut audio,
+                        &mut current_app,
+                        &busy,
+                        &timer_tx,
+                    );
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
@@ -357,7 +428,25 @@ fn handler_loop(
                 mode = Mode::Idle;
                 pending_tap = false;
                 first_tap_at = None;
+                pending_start = false;
                 transition(&app, &db, &state, PipelineState::Idle, None, None);
+            }
+            Msg::SessionDone => {
+                busy.store(false, Ordering::Relaxed);
+                if pending_start && mode == Mode::Idle {
+                    // A hotkey press arrived while the worker was busy —
+                    // begin that queued dictation now.
+                    pending_start = false;
+                    current_app = inject::frontmost_app();
+                    if let Err(e) = audio.start() {
+                        fail(&app, &db, &state, format!("microphone unavailable: {e}"));
+                    } else {
+                        mode = Mode::Ptt;
+                        pending_tap = false;
+                        spawn_max_session_timer(&timer_tx);
+                        transition(&app, &db, &state, PipelineState::Recording, None, None);
+                    }
+                }
             }
         }
     }
@@ -377,22 +466,88 @@ fn finish_session(
     state: &Arc<AtomicU8>,
     audio: &mut AudioEngine,
     current_app: &mut String,
+    busy: &std::sync::atomic::AtomicBool,
+    done_tx: &mpsc::Sender<Msg>,
 ) {
-    let wav_path = temp_wav_path();
-    match audio.stop(&wav_path) {
-        Ok(Some(duration_ms)) => run_session(
-            app,
-            db,
-            state,
-            &wav_path,
-            duration_ms,
-            std::mem::take(current_app),
-        ),
-        Ok(None) => {
-            let _ = std::fs::remove_file(&wav_path);
-            transition(app, db, state, PipelineState::Idle, None, None);
+    match audio.stop() {
+        Ok(Some(recording)) => {
+            // Hand the recording to a worker thread so the hotkey handler
+            // can keep reacting while STT/LLM/injection run.
+            busy.store(true, Ordering::Relaxed);
+            let worker_app = app.clone();
+            let worker_db = Arc::clone(db);
+            let worker_state = Arc::clone(state);
+            let done_tx = done_tx.clone();
+            let target_app = std::mem::take(current_app);
+            std::thread::spawn(move || {
+                // SessionDone must be sent even if processing panics,
+                // otherwise the pipeline would stay busy forever.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_session(
+                        &worker_app,
+                        &worker_db,
+                        &worker_state,
+                        recording,
+                        target_app,
+                    );
+                }));
+                if result.is_err() {
+                    eprintln!("dictation worker panicked");
+                    set_state(&worker_state, PipelineState::Idle);
+                }
+                let _ = done_tx.send(Msg::SessionDone);
+            });
         }
+        Ok(None) => transition(app, db, state, PipelineState::Idle, None, None),
         Err(e) => fail(app, db, state, e.to_string()),
+    }
+}
+
+/// Accumulates per-stage wall-clock durations for one dictation and reports
+/// them once the session ends — to stderr and as a `pipeline-timing` event —
+/// so release-to-paste latency stays measurable.
+struct StageTimings {
+    started: Instant,
+    stages: Vec<(&'static str, u128)>,
+}
+
+impl StageTimings {
+    fn begin() -> Self {
+        Self {
+            started: Instant::now(),
+            stages: Vec::new(),
+        }
+    }
+
+    /// Records elapsed time since `since` under `name`; returns a fresh
+    /// instant for timing the next stage.
+    fn mark(&mut self, name: &'static str, since: Instant) -> Instant {
+        let now = Instant::now();
+        self.stages
+            .push((name, now.duration_since(since).as_millis()));
+        now
+    }
+
+    fn report(self, app: &AppHandle) {
+        let total_ms = self.started.elapsed().as_millis();
+        let breakdown = self
+            .stages
+            .iter()
+            .map(|(name, ms)| format!("{name} {ms}ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("dictation latency: total {total_ms}ms ({breakdown})");
+        let _ = app.emit(
+            "pipeline-timing",
+            serde_json::json!({
+                "totalMs": total_ms,
+                "stages": self
+                    .stages
+                    .iter()
+                    .map(|(name, ms)| serde_json::json!({ "name": name, "ms": ms }))
+                    .collect::<Vec<_>>(),
+            }),
+        );
     }
 }
 
@@ -400,10 +555,10 @@ fn run_session(
     app: &AppHandle,
     db: &Arc<Store>,
     state: &Arc<AtomicU8>,
-    wav_path: &std::path::Path,
-    duration_ms: i64,
+    recording: crate::audio::Recording,
     target_app: String,
 ) {
+    let mut timings = StageTimings::begin();
     transition(app, db, state, PipelineState::Transcribing, None, None);
 
     let language = {
@@ -414,46 +569,71 @@ fn run_session(
         }
     };
 
-    let result = stt::transcribe(db, wav_path, &language, Some(&db_prompt(db)));
-    let _ = std::fs::remove_file(wav_path);
+    let result = stt::transcribe(db, &recording.wav, &language, Some(&db_prompt(db)));
+    let stt_started = timings.mark("wav-encode+prep", timings.started);
 
     let raw_text = match result {
         Ok(r) => r.text,
-        Err(e) => return fail(app, db, state, e.to_string()),
+        Err(e) => {
+            timings.report(app);
+            return fail(app, db, state, e.to_string());
+        }
     };
+    let stt_done = timings.mark("stt", stt_started);
     if raw_text.trim().is_empty() {
+        timings.report(app);
         return fail(app, db, state, "transcription came back empty".to_string());
     }
 
-    let data = SessionData::new(duration_ms, target_app, language);
+    let data = SessionData::new(recording.duration_ms, target_app, language);
 
     // Fast path: whole utterance matches a snippet trigger — no LLM call.
     let snippet = crate::cloud::try_snippet(db, &raw_text).unwrap_or(None);
     if let Some(expanded) = snippet {
-        return finish(app, db, state, &expanded, &raw_text, &data);
+        timings.mark("snippet", stt_done);
+        return finish(app, db, state, &expanded, &raw_text, &data, timings);
     }
 
     transition(app, db, state, PipelineState::Injecting, None, None);
 
     // LLM cleanup; fall back to the raw transcription on any failure so a
-    // cleanup outage never costs the user their dictation.
-    let polished = match llm::polish(db, &raw_text, &data.target_app) {
-        Ok(text) => text,
-        Err(e) => {
-            eprintln!("cleanup skipped: {e}");
-            emit_warning(app, format!("cleanup unavailable — pasted raw text ({e})"));
-            raw_text.clone()
+    // cleanup outage never costs the user their dictation. Skippable for
+    // minimum-latency raw paste via the cleanupEnabled setting.
+    let polished = if cleanup_enabled(db) {
+        match llm::polish(db, &raw_text, &data.target_app) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("cleanup skipped: {e}");
+                emit_warning(app, format!("cleanup unavailable — pasted raw text ({e})"));
+                raw_text.clone()
+            }
         }
+    } else {
+        raw_text.clone()
     };
+    timings.mark("llm-cleanup", stt_done);
+
+    // Vocabulary learning: diff raw vs polished speech and auto-capture
+    // recurring names/jargon (gated by the autoLearnVocabulary setting).
+    crate::learn::observe(db, &raw_text, &polished);
 
     // Command mode: recognized spoken commands execute instead of pasting.
     if crate::commands::is_enabled(db) {
         if let Some(command) = crate::commands::parse(&polished) {
+            timings.report(app);
             return run_command(app, db, state, &polished, &raw_text, &data, &command);
         }
     }
 
-    finish(app, db, state, &polished, &raw_text, &data);
+    finish(app, db, state, &polished, &raw_text, &data, timings);
+}
+
+fn cleanup_enabled(db: &Store) -> bool {
+    db.get_setting("cleanupEnabled")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<bool>(&v).ok())
+        .unwrap_or(true)
 }
 
 fn run_command(
@@ -471,7 +651,15 @@ fn run_command(
         }
         Err(e) => {
             emit_warning(app, format!("command failed — text pasted instead ({e})"));
-            return finish(app, db, state, polished, raw_text, data);
+            return finish(
+                app,
+                db,
+                state,
+                polished,
+                raw_text,
+                data,
+                StageTimings::begin(),
+            );
         }
     }
 
@@ -510,11 +698,14 @@ fn finish(
     final_text: &str,
     raw_text: &str,
     data: &SessionData,
+    mut timings: StageTimings,
 ) {
     transition(app, db, state, PipelineState::Injecting, None, None);
 
+    let inject_started = Instant::now();
     if let Err(e) = inject::paste_text(final_text) {
         store_anyway(db, final_text, raw_text, data);
+        timings.report(app);
         fail(
             app,
             db,
@@ -523,6 +714,7 @@ fn finish(
         );
         return;
     }
+    timings.mark("inject", inject_started);
 
     match db.insert_transcript(
         final_text,
@@ -536,6 +728,7 @@ fn finish(
         }
         Err(e) => fail(app, db, state, e.to_string()),
     }
+    timings.report(app);
 }
 
 fn store_anyway(db: &Store, text: &str, raw_text: &str, data: &SessionData) {
@@ -557,12 +750,4 @@ fn emit_warning(app: &AppHandle, message: String) {
 
 fn db_prompt(db: &Store) -> String {
     stt::build_prompt(db).unwrap_or_default()
-}
-
-fn temp_wav_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("flowclone-{nanos}.wav"))
 }

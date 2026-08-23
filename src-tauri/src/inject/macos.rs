@@ -12,10 +12,34 @@ extern "C" {
     // 0 = denied, 1 = unknown/not-determined, 2 = granted.
     #[link_name = "IOHIDCheckAccess"]
     fn io_hid_check_access(request_type: i64) -> i64;
+
+    // CoreGraphics event synthesis — posts Cmd+V without spawning a process.
+    // CGEventCreateKeyboardEvent(allocator, virtual_keycode, key_down) -> CGEventRef
+    fn CGEventCreateKeyboardEvent(
+        allocator: *mut std::ffi::c_void,
+        key_code: u16,
+        key_down: bool,
+    ) -> *mut std::ffi::c_void;
+    fn CGEventSetFlags(event: *mut std::ffi::c_void, flags: u64);
+    fn CGEventPost(tap_location: u32, event: *const std::ffi::c_void);
+    fn CFRelease(cf: *mut std::ffi::c_void);
 }
 
 #[link(name = "IOKit", kind = "framework")]
 extern "C" {}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {}
+
+/// kCGSessionEventTap — routes synthesized keys into the login session.
+const K_CG_SESSION_EVENT_TAP: u32 = 1;
+/// kCGEventFlagMaskCommand
+const K_CG_EVENT_FLAG_COMMAND: u64 = 1 << 20;
+/// kVK_ANSI_V
+const KEY_V: u16 = 0x09;
 
 const K_IO_HID_REQUEST_TYPE_LISTEN_EVENT: i64 = 1;
 const K_IO_HID_ACCESS_GRANTED: i64 = 2;
@@ -54,8 +78,12 @@ pub fn frontmost_app() -> String {
 }
 
 /// Pastes text at the current cursor location by placing it on the clipboard,
-/// synthesizing Cmd+V via System Events, then restoring the previous
-/// clipboard contents once the target app has read it.
+/// synthesizing Cmd+V, then restoring the previous clipboard contents once
+/// the target app has read it.
+///
+/// The keystroke is synthesized natively via CGEvent (no process spawn, no
+/// AppleScript compile — saves ~150-300ms versus osascript), falling back to
+/// System Events if event creation fails.
 pub fn paste_text(text: &str) -> Result<(), String> {
     if !is_accessibility_trusted() {
         return Err(
@@ -71,18 +99,22 @@ pub fn paste_text(text: &str) -> Result<(), String> {
         .set_text(text.to_string())
         .map_err(|e| format!("failed to stage clipboard: {e}"))?;
 
-    let script = r#"tell application "System Events" to keystroke "v" using command down"#;
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()
-        .map_err(|e| format!("failed to run osascript: {e}"))?;
+    // Give the pasteboard a beat to settle before the target app reads it.
+    thread::sleep(Duration::from_millis(40));
 
-    if !output.status.success() {
-        return Err(format!(
-            "keystroke failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    if !post_cmd_v() {
+        let script = r#"tell application "System Events" to keystroke "v" using command down"#;
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output()
+            .map_err(|e| format!("failed to run osascript: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "keystroke failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
     }
 
     // Restore the user's clipboard after the pasted app has consumed it.
@@ -95,4 +127,29 @@ pub fn paste_text(text: &str) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+/// Posts Cmd+V key-down/key-up via CoreGraphics. Returns false when event
+/// creation fails so the caller can fall back to osascript.
+fn post_cmd_v() -> bool {
+    unsafe {
+        let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, true);
+        if down.is_null() {
+            return false;
+        }
+        CGEventSetFlags(down, K_CG_EVENT_FLAG_COMMAND);
+        CGEventPost(K_CG_SESSION_EVENT_TAP, down);
+        CFRelease(down);
+
+        thread::sleep(Duration::from_millis(10));
+
+        let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, false);
+        if up.is_null() {
+            return false;
+        }
+        CGEventSetFlags(up, K_CG_EVENT_FLAG_COMMAND);
+        CGEventPost(K_CG_SESSION_EVENT_TAP, up);
+        CFRelease(up);
+    }
+    true
 }

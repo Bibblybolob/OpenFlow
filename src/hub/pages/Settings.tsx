@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/ipc";
 import {
   ACCENTS,
@@ -17,6 +17,14 @@ import {
 } from "../../lib/pillStyle";
 
 type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter";
+type SttProviderChoice = "openai" | "openrouter" | "local";
+
+interface LocalModelInfo {
+  id: string;
+  label: string;
+  approxMb: number;
+  downloaded: boolean;
+}
 
 const LANGUAGES: { code: string; label: string }[] = [
   { code: "auto", label: "Auto-detect" },
@@ -54,13 +62,18 @@ export default function Settings({
   const [flowbarPreset, setFlowbarPreset] = useState("bottom_center");
   const [pillStyle, setPillStyle] = useState<PillStyle>(DEFAULT_PILL_STYLE);
   const [provider, setProvider] = useState<ProviderChoice>("auto");
-  const [sttProvider, setSttProvider] = useState<ProviderChoice>("openai");
+  const [sttProvider, setSttProvider] = useState<SttProviderChoice>("openai");
+  const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
+  const [localModel, setLocalModel] = useState("base");
+  const [localDownload, setLocalDownload] = useState<string | null>(null);
+  const [cleanupEnabled, setCleanupEnabled] = useState(true);
   const [model, setModel] = useState("");
   const [language, setLanguage] = useState("auto");
-  const [hotkey, setHotkey] = useState<string[]>(["F5"]);
+  const [hotkey, setHotkey] = useState<string[]>(["Right Shift"]);
   const [hotkeyOptions, setHotkeyOptions] = useState<string[]>([
-    "F1", "F5", "CapsLock", "Right Shift",
+    "F1", "CapsLock", "Right Shift",
   ]);
+  const [watcherStatus, setWatcherStatus] = useState("waiting-permissions");
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -72,6 +85,40 @@ export default function Settings({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const unlisten = listen<ModelProgressPayload>(
+      "local-model-progress",
+      (event) => {
+        const payload = event.payload;
+        if (payload.type === "done") {
+          setLocalDownload(null);
+          api.localModelStatus().then(setLocalModels).catch(() => {});
+          return;
+        }
+        setLocalDownload(
+          `${payload.model}: ${payload.downloadedMb}/${payload.totalMb} MB`,
+        );
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{ status: string; detail?: string }>(
+      "hotkey-status",
+      (event) => {
+        setWatcherStatus(event.payload.status);
+        refresh();
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function refresh() {
     const ok = await api.getSetting<string>("openaiApiKey");
     const ak = await api.getSetting<string>("anthropicApiKey");
@@ -79,16 +126,20 @@ export default function Settings({
     const prov =
       ((await api.getSetting<string>("llmProvider")) as ProviderChoice) ?? "auto";
     const sttProv =
-      ((await api.getSetting<string>("sttProvider")) as ProviderChoice) ??
+      ((await api.getSetting<string>("sttProvider")) as SttProviderChoice) ??
       "openai";
     const mdl = await api.getSetting<string>("llmModel");
     const lang = (await api.getSetting<string>("language")) ?? "auto";
-    const hk = await api.getHotkey().catch(() => ["F5"]);
+    const hk = await api.getHotkey().catch(() => ["Right Shift"]);
     const hkOptions = await api
       .hotkeyOptions()
-      .catch(() => ["F1", "F5", "CapsLock", "Right Shift"]);
+      .catch(() => ["F1", "CapsLock", "Right Shift"]);
+    const ws = await api.hotkeyWatcherStatus().catch(() => "waiting-permissions");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
+    const ce = await api.getSetting<boolean>("cleanupEnabled");
+    const lm = await api.getSetting<string>("sttLocalModel");
+    const lms = await api.localModelStatus().catch(() => [] as LocalModelInfo[]);
     const style = await loadPillStyle();
 
     setSavedOpenai(Boolean(ok));
@@ -101,10 +152,14 @@ export default function Settings({
     setSttProvider(sttProv ?? "openai");
     setModel(mdl ?? "");
     setLanguage(lang ?? "auto");
-    setHotkey(hk.length ? hk : ["F5"]);
-    setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "F5", "CapsLock", "Right Shift"]);
+    setHotkey(hk.length ? hk : ["Right Shift"]);
+    setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "CapsLock", "Right Shift"]);
+    setWatcherStatus(ws);
     setAutostart(as);
     setCommandMode(cm ?? true);
+    setCleanupEnabled(ce ?? true);
+    setLocalModel(lm ?? "base");
+    setLocalModels(lms);
     setPillStyle(style);
     setAccessibility(await invokeAccessibility());
     setInputMonitoring(await api.inputMonitoringStatus().catch(() => true));
@@ -158,7 +213,7 @@ export default function Settings({
     }
   }
 
-  async function changeSttProvider(choice: ProviderChoice) {
+  async function changeSttProvider(choice: SttProviderChoice) {
     setSttProvider(choice);
     try {
       await api.setSetting("sttProvider", choice);
@@ -167,7 +222,33 @@ export default function Settings({
       }
     } catch (e) {
       console.error(e);
-      setSttProvider(choice === "openrouter" ? "openai" : "openrouter");
+      setSttProvider(choice === "local" ? "openai" : choice);
+    }
+  }
+
+  async function changeLocalModel(id: string) {
+    setLocalModel(id);
+    try {
+      await api.setLocalModel(id);
+      const info = localModels.find((m) => m.id === id);
+      if (info && !info.downloaded) {
+        setLocalDownload(`${id}: starting…`);
+        await api.downloadLocalModel(id);
+      }
+    } catch (e) {
+      console.error(e);
+      setLocalDownload(null);
+    }
+  }
+
+  async function toggleCleanupEnabled() {
+    const next = !cleanupEnabled;
+    setCleanupEnabled(next);
+    try {
+      await api.setSetting("cleanupEnabled", next);
+    } catch (e) {
+      console.error(e);
+      setCleanupEnabled(!next);
     }
   }
 
@@ -297,19 +378,56 @@ export default function Settings({
           <select
             value={sttProvider}
             onChange={(e) =>
-              changeSttProvider(e.target.value as ProviderChoice)
+              changeSttProvider(e.target.value as SttProviderChoice)
             }
             className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm outline-none focus:border-indigo-400/60"
           >
             <option value="openai">OpenAI Whisper</option>
             <option value="openrouter">OpenRouter (audio model)</option>
+            <option value="local">On-device (whisper.cpp)</option>
           </select>
           <p className="flex-1 self-center text-xs text-neutral-600">
             {sttProvider === "openrouter"
               ? "Sends audio to an OpenRouter chat model — works with your existing OpenRouter key."
-              : "Uses your OpenAI key (sk-…). An OpenRouter key here will be rejected."}
+              : sttProvider === "local"
+                ? "Runs entirely offline — fastest and most private. First use downloads the model."
+                : "Uses your OpenAI key (sk-…). An OpenRouter key here will be rejected."}
           </p>
         </div>
+        {sttProvider === "local" && (
+          <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+            {localModels.map((m) => (
+              <div key={m.id} className="flex items-center justify-between gap-4">
+                <label className="flex flex-1 items-center gap-3 text-sm">
+                  <input
+                    type="radio"
+                    name="localModel"
+                    checked={localModel === m.id}
+                    onChange={() => changeLocalModel(m.id)}
+                    className="accent-indigo-400"
+                  />
+                  <span className="text-neutral-300">{m.label}</span>
+                  {!m.downloaded && (
+                    <span className="text-xs text-neutral-600">
+                      ~{m.approxMb} MB
+                    </span>
+                  )}
+                </label>
+                <span
+                  className={`shrink-0 text-xs ${
+                    m.downloaded ? "text-emerald-400" : "text-neutral-500"
+                  }`}
+                >
+                  {localDownload?.startsWith(`${m.id}:`)
+                    ? localDownload.split(": ", 2)[1] ?? "Downloading…"
+                    : m.downloaded
+                      ? "Ready"
+                      : "Not downloaded"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="flex flex-col gap-2">
@@ -465,7 +583,13 @@ export default function Settings({
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
           Cleanup
         </h2>
-        <div className="flex gap-2">
+        <ToggleRow
+          label="AI cleanup"
+          hint="Removes fillers and fixes punctuation — turn off to paste raw transcription with minimum latency"
+          checked={cleanupEnabled}
+          onChange={toggleCleanupEnabled}
+        />
+        <div className={`flex gap-2 ${cleanupEnabled ? "" : "pointer-events-none opacity-40"}`}>
           <select
             value={provider}
             onChange={(e) => setProvider(e.target.value as ProviderChoice)}
@@ -504,6 +628,7 @@ export default function Settings({
           Permissions
         </h2>
         <div className="overflow-hidden rounded-xl border border-white/5">
+          <WatcherRow status={watcherStatus} />
           <PermRow label="Microphone" ok={true} hint="Granted on first use" />
           <PermRow
             label="Input Monitoring (global hotkey)"
@@ -659,6 +784,43 @@ function KeyRow({
   );
 }
 
+function WatcherRow({ status }: { status: string }) {
+  const [prefix, detail] = status.split(":", 2);
+  const ok = prefix === "ready";
+  const label =
+    prefix === "ready"
+      ? "Hotkey watcher"
+      : prefix === "waiting-permissions"
+        ? "Hotkey watcher — waiting for Input Monitoring"
+        : "Hotkey watcher unavailable";
+  return (
+    <div className="flex items-center justify-between bg-white/[0.03] px-4 py-3 not-last:border-b not-last:border-white/5">
+      <div>
+        <span className="text-sm text-neutral-300">{label}</span>
+        {detail && <p className="text-xs text-neutral-600">{detail}</p>}
+        {prefix === "waiting-permissions" && (
+          <p className="text-xs text-neutral-600">
+            Without it no hotkey can fire in any app
+          </p>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        {prefix === "waiting-permissions" && (
+          <button
+            onClick={openInputMonitoringSettings}
+            className="rounded-md bg-indigo-500/20 px-2 py-1 text-xs text-indigo-300 transition hover:bg-indigo-500/30"
+          >
+            Open System Settings
+          </button>
+        )}
+        <span className={`text-xs ${ok ? "text-emerald-400" : "text-amber-400"}`}>
+          {ok ? "Active" : "Check"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function PermRow({
   label,
   ok,
@@ -754,4 +916,12 @@ async function openInputMonitoringSettings() {
   } catch {
     // best effort only
   }
+}
+
+interface ModelProgressPayload {
+  type?: string;
+  model: string;
+  downloadedMb: number;
+  totalMb: number;
+  message?: string;
 }

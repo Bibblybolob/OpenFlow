@@ -18,7 +18,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const { lastTranscriptId } = usePipelineState();
 
   useEffect(() => {
-    api.getHotkey().then(setHotkey).catch(() => setHotkey(["F5"]));
+    api.getHotkey().then(setHotkey).catch(() => setHotkey(["Right Shift"]));
     api.setFlowbarVisible(false);
   }, []);
 

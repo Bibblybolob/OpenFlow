@@ -32,10 +32,11 @@ const pillVariants = {
 export default function FlowBar() {
   const [state, setState] = useState<State>("idle");
   const [hasError, setHasError] = useState(false);
+  const [errorText, setErrorText] = useState<string | null>(null);
   const [wave, setWave] = useState<number[]>(() =>
     new Array(WAVE_BARS).fill(0),
   );
-  const [hotkeyHint, setHotkeyHint] = useState("F5");
+  const [hotkeyHint, setHotkeyHint] = useState("Right Shift");
   const [hovering, setHovering] = useState(false);
   const [style, setStyle] = useState<PillStyle>({
     shape: "pill",
@@ -83,6 +84,7 @@ export default function FlowBar() {
     listen<PipelineEvent>("pipeline", (e) => {
       applyState(e.payload.type);
       setHasError(Boolean(e.payload.error));
+      setErrorText(e.payload.error ?? null);
     }).then((fn) => (unlistenPipeline = fn));
 
     listen<number>("audio-level", (e) => {
@@ -297,11 +299,13 @@ export default function FlowBar() {
           </div>
         ) : (
           <span
-            className={`max-w-40 truncate select-none text-xs ${
+            className={`max-w-44 truncate select-none text-xs ${
               hasError ? "text-red-300" : "text-neutral-500"
             }`}
           >
-            {hasError ? "Error — check Hub" : `Hold ${hotkeyHint} or click`}
+            {hasError
+              ? (errorText ?? "Error — check Hub")
+              : `Hold ${hotkeyHint} or click`}
           </span>
         )}
 

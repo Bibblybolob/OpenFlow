@@ -23,25 +23,21 @@ pub fn polish(db: &Store, raw_text: &str, app_identifier: &str) -> Result<String
         .unwrap_or_default();
     let body = build_request_body(cfg.provider, &cfg.model, raw_text, &style, db)?;
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| StoreError::Other(e.to_string()))?;
-
     let req = match cfg.provider {
-        Provider::OpenAi => client
+        Provider::OpenAi => super::http_client()?
             .post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&cfg.api_key),
-        Provider::Anthropic => client
+        Provider::Anthropic => super::http_client()?
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &cfg.api_key)
             .header("anthropic-version", "2023-06-01"),
-        Provider::OpenRouter => client
+        Provider::OpenRouter => super::http_client()?
             .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(&cfg.api_key),
     };
 
     let resp = req
+        .timeout(std::time::Duration::from_secs(15))
         .json(&body)
         .send()
         .map_err(|e| StoreError::Other(format!("cleanup request failed: {e}")))?;

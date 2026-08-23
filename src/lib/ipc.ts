@@ -91,6 +91,8 @@ export const api = {
 
   pipelineStatus: () => invoke<string>("pipeline_status"),
 
+  hotkeyWatcherStatus: () => invoke<string>("hotkey_watcher_status"),
+
   getHotkey: () => invoke<string[]>("get_hotkey"),
 
   hotkeyOptions: () => invoke<string[]>("hotkey_options"),
@@ -113,4 +115,15 @@ export const api = {
   checkForUpdate: () => invoke<string | null>("check_for_update"),
 
   installUpdate: () => invoke<void>("install_update"),
+
+  localModelStatus: () =>
+    invoke<
+      { id: string; label: string; approxMb: number; downloaded: boolean }[]
+    >("local_model_status"),
+
+  downloadLocalModel: (model: string) =>
+    invoke<void>("download_local_model", { model }),
+
+  setLocalModel: (model: string) =>
+    invoke<void>("set_local_model", { model }),
 };

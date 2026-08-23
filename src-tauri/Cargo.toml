@@ -30,8 +30,10 @@ device_query = "2"
 cpal = "0.15"
 hound = "3.5"
 arboard = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 base64 = "0.22"
+whisper-rs = "0.14"
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
 [target.'cfg(target_os = "windows")'.dependencies]

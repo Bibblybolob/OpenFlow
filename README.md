@@ -6,7 +6,7 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 
 ## Features
 
-- **Push-to-talk dictation** — hold the hotkey (default `F5`), speak, release. Text is transcribed, cleaned up by an LLM, and pasted at your cursor.
+- **Push-to-talk dictation** — hold the hotkey (default `Right Shift`), speak, release. Text is transcribed, cleaned up by an LLM, and pasted at your cursor.
 - **Hands-free mode** — double-tap the hotkey to keep recording without holding; tap again or press Esc to finish.
 - **AI cleanup** — GPT-4o-mini (OpenAI), Claude (Anthropic), or any model via OpenRouter rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), backtrack handling.
 - **Pluggable LLM providers** — bring an OpenAI, Claude, OpenRouter, or mix of keys; auto-detect or force a provider per your preference.
@@ -17,7 +17,8 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **Flow Bar** — floating, focus-safe pill with live waveform, click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
 - **History & stats** — searchable transcript history grouped by day, word counts, streaks.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
-- **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (macOS offers Right Option/Cmd; Windows/Linux add Right Ctrl/Alt/Win); applies live and migrates stale key names on upgrade.
+- **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (default **Right Shift**: under both palms, never types a character, and never intercepted by macOS features the way F5 is); applies live and migrates stale key names on upgrade.
+- **Self-healing hotkey watcher** — if Input Monitoring is revoked (e.g. after replacing the app bundle), the watcher reports its state to the Hub ("waiting for permission / active / unavailable") and recovers automatically once the permission returns; microphone failures surface on the pill instead of silently doing nothing.
 - **Reliable Flow Bar visibility** — the pill is shown natively by the Rust core on every state change (not just via webview events), its position is clamped to the visible monitor, and the webview reconciles against the pipeline state as a fallback — so dictation always has a visible indicator.
 - **Guided onboarding** — first-launch wizard walks through Accessibility + microphone permissions with live checks, then a real dictation test unlocks the app.
 - **Privacy-first storage** — everything local in SQLite; audio is transient; keys stay on-device.
@@ -47,12 +48,23 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 ### Dictation flow
 
 1. Hotkey down → frontmost app captured for style matching, mic stream opens.
-2. Hotkey up → WAV encoded to a temp file.
-3. OpenAI STT transcribes (dictionary terms injected as a bias prompt).
+2. Hotkey up → audio is resampled to 16 kHz mono and encoded as WAV in memory.
+3. Transcription: OpenAI STT, OpenRouter audio model, or on-device whisper.cpp
+   (dictionary terms injected as a bias prompt). HTTP connections stay warm
+   between sessions so no TLS handshake is paid per dictation.
 4. Snippet fast-path: exact trigger match expands locally, no LLM call.
-5. LLM cleanup polishes the text (raw text is the fallback if this fails — you never lose a dictation).
+5. LLM cleanup polishes the text (skippable via Settings → Cleanup → AI
+   cleanup; raw text is also the fallback if this fails — you never lose a
+   dictation).
 6. Command mode check: recognized commands execute instead of pasting.
-7. Text is staged on the clipboard, Cmd+V synthesized into the target app, clipboard restored.
+7. Text is staged on the clipboard, Cmd+V synthesized natively via CGEvent
+   (macOS) or SendInput Ctrl+V (Windows) into the target app, clipboard
+   restored.
+
+Processing runs on a worker thread, so the hotkey stays responsive while a
+dictation is transcribing — a press during that window queues the next
+session automatically. Per-stage timings are logged to stderr and emitted as
+`pipeline-timing` events for latency profiling.
 
 ## Getting started
 
@@ -70,7 +82,7 @@ First run:
 3. Grant **Microphone** access on first dictation.
 4. Add an API key in **Settings → API keys** (OpenAI for transcription; OpenAI, Claude, or OpenRouter for cleanup). Env vars `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` also work.
 
-Then hold `F5` anywhere and talk.
+Then hold `Right Shift` anywhere and talk.
 
 > **Note:** replacing the app bundle (e.g., rebuilding or updating an ad-hoc-signed build) silently revokes Accessibility + Input Monitoring on macOS. If the hotkey stops working after an update, re-toggle both permissions.
 
