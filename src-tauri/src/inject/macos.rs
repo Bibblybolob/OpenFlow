@@ -40,6 +40,8 @@ const K_CG_SESSION_EVENT_TAP: u32 = 1;
 const K_CG_EVENT_FLAG_COMMAND: u64 = 1 << 20;
 /// kVK_ANSI_V
 const KEY_V: u16 = 0x09;
+/// kVK_ANSI_Z — undo, for "scratch that".
+const KEY_Z: u16 = 0x06;
 
 const K_IO_HID_REQUEST_TYPE_LISTEN_EVENT: i64 = 1;
 const K_IO_HID_ACCESS_GRANTED: i64 = 2;
@@ -132,8 +134,19 @@ pub fn paste_text(text: &str) -> Result<(), String> {
 /// Posts Cmd+V key-down/key-up via CoreGraphics. Returns false when event
 /// creation fails so the caller can fall back to osascript.
 fn post_cmd_v() -> bool {
+    post_cmd_key(KEY_V)
+}
+
+/// Synthesizes Cmd+Z in the login session — best-effort "scratch that" that
+/// removes the last paste in apps with a working undo stack. Returns false
+/// when event synthesis fails.
+fn post_cmd_z() -> bool {
+    post_cmd_key(KEY_Z)
+}
+
+fn post_cmd_key(key: u16) -> bool {
     unsafe {
-        let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, true);
+        let down = CGEventCreateKeyboardEvent(std::ptr::null_mut(), key, true);
         if down.is_null() {
             return false;
         }
@@ -143,7 +156,7 @@ fn post_cmd_v() -> bool {
 
         thread::sleep(Duration::from_millis(10));
 
-        let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), KEY_V, false);
+        let up = CGEventCreateKeyboardEvent(std::ptr::null_mut(), key, false);
         if up.is_null() {
             return false;
         }
@@ -152,4 +165,18 @@ fn post_cmd_v() -> bool {
         CFRelease(up);
     }
     true
+}
+
+/// Best-effort removal of the last pasted text via synthesized undo.
+pub fn undo_paste() -> Result<(), String> {
+    if !is_accessibility_trusted() {
+        return Err(
+            "FlowClone needs Accessibility permission to undo — grant it in System Settings → Privacy & Security → Accessibility"
+                .to_string(),
+        );
+    }
+    if !post_cmd_z() {
+        return Err("could not synthesize Cmd+Z".to_string());
+    }
+    Ok(())
 }

@@ -7,6 +7,8 @@ use tauri_plugin_opener::OpenerExt;
 pub enum Command {
     OpenUrl(String),
     Copy(String),
+    /// Remove the most recent dictation from the page (synthesized undo).
+    ScratchThat,
 }
 
 const SITES: &[(&str, &str)] = &[
@@ -58,6 +60,13 @@ pub fn parse(text: &str) -> Option<Command> {
         }
     }
 
+    let unpunctuated = trimmed.trim_end_matches(['.', '!', '?']);
+    for phrase in ["scratch that", "scratch this", "undo that", "undo this"] {
+        if unpunctuated.eq_ignore_ascii_case(phrase) {
+            return Some(Command::ScratchThat);
+        }
+    }
+
     if let Some(rest) = strip_prefix_ci(trimmed, "open ") {
         let site = rest.trim().trim_end_matches(['.', '!', '?']).to_lowercase();
         if !site.is_empty() && !site.contains(' ') {
@@ -87,6 +96,7 @@ pub fn execute(app: &AppHandle, command: &Command) -> Result<(), String> {
         Command::Copy(text) => arboard::Clipboard::new()
             .and_then(|mut cb| cb.set_text(text.to_string()))
             .map_err(|e| format!("clipboard unavailable: {e}")),
+        Command::ScratchThat => crate::scratch_last(),
     }
 }
 
@@ -94,6 +104,7 @@ pub fn describe(command: &Command) -> String {
     match command {
         Command::OpenUrl(url) => format!("Opening {url}"),
         Command::Copy(_) => "Copied to clipboard".to_string(),
+        Command::ScratchThat => "Removed the last dictation".to_string(),
     }
 }
 
@@ -172,6 +183,13 @@ mod tests {
         assert_eq!(parse("I want to copy your style"), None);
         assert_eq!(parse(""), None);
         assert_eq!(parse("just talking about how to open things"), None);
+    }
+
+    #[test]
+    fn scratch_that_variants_parse() {
+        assert_eq!(parse("Scratch that"), Some(Command::ScratchThat));
+        assert_eq!(parse("undo that."), Some(Command::ScratchThat));
+        assert_eq!(parse("please scratch that"), None);
     }
 
     #[test]

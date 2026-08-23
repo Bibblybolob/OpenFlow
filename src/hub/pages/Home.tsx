@@ -50,6 +50,10 @@ export default function Home() {
     refresh();
   }
 
+  async function onCopy(text: string) {
+    await navigator.clipboard.writeText(text);
+  }
+
   const visible = transcripts.filter((t) =>
     query.trim()
       ? true
@@ -109,12 +113,33 @@ export default function Home() {
                 {t.targetApp || "unknown app"}
               </p>
             </div>
-            <button
-              onClick={() => onDelete(t.id)}
-              className="shrink-0 rounded-md px-2 py-1 text-xs text-neutral-500 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-400"
-            >
-              Delete
-            </button>
+            <div className="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100">
+              <button
+                onClick={() => onCopy(t.text)}
+                className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
+              >
+                Copy
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await api.pasteText(t.text);
+                  } catch (e) {
+                    console.error(e);
+                  }
+                }}
+                title="Paste this transcript at your cursor in the focused app"
+                className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
+              >
+                Re-paste
+              </button>
+              <button
+                onClick={() => onDelete(t.id)}
+                className="rounded-md px-2 py-1 text-xs text-neutral-500 transition hover:bg-red-500/10 hover:text-red-400"
+              >
+                Delete
+              </button>
+            </div>
           </div>
         ))}
       </div>

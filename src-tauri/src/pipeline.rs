@@ -208,6 +208,11 @@ impl Pipeline {
         let _ = self.control_tx.send(Msg::PauseToggle);
     }
 
+    /// Shared FSM atom for commands that re-enter the pipeline (retry).
+    pub(crate) fn state_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.state)
+    }
+
     /// Starts or finishes a recording (Flow Bar click).
     pub fn toggle(&self) {
         match self.current() {
@@ -352,6 +357,7 @@ fn handler_loop(
     // start request instead of blocking like the old synchronous flow.
     let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut pending_start = false;
+    let mut last_esc_at: Option<Instant> = None;
     // Shared with the level callback (last audible input) and a generation
     // counter that invalidates stale hands-free auto-stop watchdogs.
     let last_voice_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -492,6 +498,38 @@ fn handler_loop(
                 }
                 Mode::Idle => {}
             },
+            Msg::Hotkey(HotkeyEvent::EscapePress) => {
+                if mode != Mode::Idle {
+                    // Esc cancels the active dictation and discards audio.
+                    audio.discard();
+                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    mode = Mode::Idle;
+                    pending_tap = false;
+                    first_tap_at = None;
+                    pending_start = false;
+                    transition(&app, &db, &state, PipelineState::Idle, None, None);
+                } else {
+                    // Double-Esc while idle removes the last pasted text.
+                    let now = Instant::now();
+                    let is_double = last_esc_at
+                        .map(|t| now.duration_since(t) < Duration::from_millis(600))
+                        .unwrap_or(false);
+                    if is_double {
+                        last_esc_at = None;
+                        match crate::scratch_last() {
+                            Ok(()) => emit_warning(
+                                &app,
+                                "last dictation removed from the page".to_string(),
+                            ),
+                            Err(e) => {
+                                emit_warning(&app, format!("scratch failed: {e}"))
+                            }
+                        }
+                    } else {
+                        last_esc_at = Some(now);
+                    }
+                }
+            }
             Msg::PauseToggle => {
                 if mode == Mode::Ptt || mode == Mode::HandsFree {
                     let was_paused = state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8();
@@ -656,7 +694,7 @@ impl StageTimings {
     }
 }
 
-fn run_session(
+pub(crate) fn run_session(
     app: &AppHandle,
     db: &Arc<Store>,
     state: &Arc<AtomicU8>,
@@ -681,21 +719,26 @@ fn run_session(
         })
         .unwrap_or_else(|| "auto".to_string());
 
+    // A failure at this stage keeps the audio around so it can be retried
+    // without re-recording; success clears any stale job.
     let result = stt::transcribe(db, &recording.wav, &language, Some(&db_prompt(db)));
     let stt_started = timings.mark("wav-encode+prep", timings.started);
 
     let raw_text = match result {
         Ok(r) => r.text,
         Err(e) => {
+            crate::store_retry_job(recording.wav, target_app);
             timings.report(app);
             return fail(app, db, state, e.to_string());
         }
     };
     let stt_done = timings.mark("stt", stt_started);
     if raw_text.trim().is_empty() {
+        crate::store_retry_job(recording.wav, target_app);
         timings.report(app);
         return fail(app, db, state, "transcription came back empty".to_string());
     }
+    crate::clear_retry_job();
 
     let data = SessionData::new(recording.duration_ms, target_app, language);
 
@@ -840,6 +883,7 @@ fn finish(
     transition(app, db, state, PipelineState::Injecting, None, None);
 
     let inject_started = Instant::now();
+    crate::remember_pasted(final_text);
     if let Err(e) = inject::paste_text(final_text) {
         store_anyway(db, final_text, raw_text, data);
         timings.report(app);

@@ -455,15 +455,32 @@ export default function FlowBar() {
           </div>
         ) : (
           <span
-            className={`max-w-44 truncate select-none text-xs ${
+            className={`flex max-w-44 items-center gap-2 text-xs ${
               hasError ? "text-red-300" : "text-neutral-500"
             }`}
           >
-            {hasError
-              ? (errorText ?? "Error — check Hub")
-              : overrideLabel
-                ? `Style: ${overrideLabel}`
-                : `Hold ${hotkeyHint} or click`}
+            <span className="max-w-32 truncate">
+              {hasError
+                ? (errorText ?? "Error — check Hub")
+                : overrideLabel
+                  ? `Style: ${overrideLabel}`
+                  : `Hold ${hotkeyHint} or click`}
+            </span>
+            {hasError && (
+              <button
+                onClick={async () => {
+                  try {
+                    await api.retryLast();
+                  } catch {
+                    // best effort
+                  }
+                }}
+                title="Retry transcription of the failed dictation"
+                className="shrink-0 rounded-md bg-indigo-500/20 px-2 py-0.5 text-[10px] text-indigo-300 transition hover:bg-indigo-500/30"
+              >
+                Retry
+              </button>
+            )}
           </span>
         )}
 

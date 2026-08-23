@@ -11,6 +11,9 @@ pub enum HotkeyEvent {
     Up,
     /// Released after a hold shorter than the configured tap threshold.
     TapUp,
+    /// Escape pressed anywhere (cancel while recording; double-press
+    /// scratches the last paste while idle).
+    EscapePress,
 }
 
 /// Supported hotkey keys with stable string names for persistence.
@@ -157,9 +160,15 @@ impl HotkeyWatcher for PushToTalkWatcher {
             }
             let mut held = false;
             let mut held_since = Instant::now();
+            let mut esc_held = false;
             loop {
                 let keys = self.config.read().unwrap().keys.clone();
                 let pressed = device.get_keys();
+                let esc_now = pressed.contains(&Keycode::Escape);
+                if esc_now && !esc_held && tx.send(HotkeyEvent::EscapePress).is_err() {
+                    return;
+                }
+                esc_held = esc_now;
                 let down = !keys.is_empty() && keys.iter().all(|k| pressed.contains(k));
                 match (down, held) {
                     (true, false) => {

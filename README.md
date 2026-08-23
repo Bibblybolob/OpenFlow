@@ -23,7 +23,8 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **Per-app styles** — tone instructions matched against the frontmost app's bundle identifier (e.g., formal in Mail, casual in Slack).
 - **Flow Bar** — floating, focus-safe pill with an always-on live waveform (real mic levels, independent of the animations setting) plus a "mic silent?" alert when the capture stream hears nothing for 2s — so you always know whether the pill is actually listening; click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
 - **Menu-bar tray** — status tooltip plus Start/Stop, Cancel, Open Hub, and Quit from any app, even while the pill is hidden.
-- **History & stats** — searchable transcript history grouped by day, word counts, streaks.
+- **History with actions** — searchable transcript history grouped by day with word counts and streaks; every row can be copied or re-pasted at the cursor in the focused app.
+- **Scratch that** — say "scratch that", double-tap Esc, or retry failed transcriptions from the pill; undo works on re-pasted history too.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
 - **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (default **Right Shift**: under both palms, never types a character, and never intercepted by macOS features the way F5 is); applies live and migrates stale key names on upgrade.
 - **Self-healing hotkey watcher** — if Input Monitoring is revoked (e.g. after replacing the app bundle), the watcher reports its state to the Hub ("waiting for permission / active / unavailable") and recovers automatically once the permission returns; microphone failures surface on the pill instead of silently doing nothing.

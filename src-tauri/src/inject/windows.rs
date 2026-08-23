@@ -11,6 +11,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
     VIRTUAL_KEY, VK_CONTROL,
 };
+
+const VK_Z: VIRTUAL_KEY = VIRTUAL_KEY(0x5A);
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 pub fn is_accessibility_trusted() -> bool {
@@ -71,6 +73,21 @@ fn send_ctrl_v() -> Result<(), String> {
             "keystroke failed — paste manually with Ctrl+V (text stays on your clipboard)"
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// Best-effort removal of the last pasted text via synthesized Ctrl+Z.
+pub fn undo_paste() -> Result<(), String> {
+    let inputs = [
+        key_input(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
+        key_input(VK_Z, KEYBD_EVENT_FLAGS(0)),
+        key_input(VK_Z, KEYEVENTF_KEYUP),
+        key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err("keystroke failed — undo manually with Ctrl+Z".to_string());
     }
     Ok(())
 }

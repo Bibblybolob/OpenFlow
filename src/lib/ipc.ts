@@ -108,6 +108,11 @@ export const api = {
 
   cancelRecording: () => invoke<void>("cancel_recording"),
 
+  pasteText: (text: string) =>
+    invoke<void>("paste_text_at_cursor", { text }),
+
+  retryLast: () => invoke<boolean>("retry_last"),
+
   togglePause: () => invoke<string>("toggle_pause"),
 
   listMics: () => invoke<string[]>("list_mics"),

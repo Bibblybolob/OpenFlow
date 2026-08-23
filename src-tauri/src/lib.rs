@@ -9,7 +9,7 @@ mod sound;
 mod store;
 
 use std::fs;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -33,6 +33,50 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
 }
 
 pub(crate) const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
+
+/// Text most recently injected into an app, kept so "scratch that" can undo
+/// it and so re-pasted history entries are equally undoable.
+pub(crate) static LAST_PASTED: Mutex<Option<String>> = Mutex::new(None);
+
+/// A transcription whose STT stage failed, kept around so it can be retried
+/// without re-recording.
+#[derive(Debug, Clone)]
+struct RetryJob {
+    wav: Vec<u8>,
+    target_app: String,
+}
+pub(crate) static PENDING_RETRY: Mutex<Option<RetryJob>> = Mutex::new(None);
+
+pub(crate) fn store_retry_job(wav: Vec<u8>, target_app: String) {
+    if let Ok(mut slot) = PENDING_RETRY.lock() {
+        *slot = Some(RetryJob { wav, target_app });
+    }
+}
+
+pub(crate) fn clear_retry_job() {
+    if let Ok(mut slot) = PENDING_RETRY.lock() {
+        *slot = None;
+    }
+}
+
+pub(crate) fn remember_pasted(text: &str) {
+    if let Ok(mut slot) = LAST_PASTED.lock() {
+        *slot = Some(text.to_string());
+    }
+}
+
+/// Removes the last pasted text via synthesized undo ("scratch that").
+pub(crate) fn scratch_last() -> Result<(), String> {
+    let mut slot = LAST_PASTED.lock().map_err(|_| "lock poisoned".to_string())?;
+    if slot.is_none() {
+        return Err("nothing recent to remove".to_string());
+    }
+    let result = inject::undo_paste();
+    if result.is_ok() {
+        *slot = None;
+    }
+    result
+}
 
 /// Handle to the tray's Start/Stop item so the pipeline can relabel it as
 /// the dictation state changes.
@@ -290,6 +334,41 @@ fn toggle_recording(state: tauri::State<AppState>) -> pipeline::PipelineState {
 #[tauri::command]
 fn cancel_recording(state: tauri::State<AppState>) {
     state.pipeline.cancel();
+}
+
+/// Re-pastes an arbitrary text (history rows) at the cursor. Also recorded
+/// as the last paste so scratch-that covers it.
+#[tauri::command]
+fn paste_text_at_cursor(_state: tauri::State<AppState>, text: String) -> Result<(), String> {
+    inject::paste_text(&text)?;
+    remember_pasted(&text);
+    Ok(())
+}
+
+#[tauri::command]
+fn retry_last(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<bool, String> {
+    let Some(job) = PENDING_RETRY
+        .lock()
+        .map_err(|_| "lock poisoned".to_string())?
+        .take()
+    else {
+        return Ok(false);
+    };
+    let db = Arc::clone(&state.db);
+    let fsm = state.pipeline.state_handle();
+    std::thread::spawn(move || {
+        pipeline::run_session(
+            &app,
+            &db,
+            &fsm,
+            crate::audio::Recording { duration_ms: 0, wav: job.wav },
+            job.target_app,
+        );
+    });
+    Ok(true)
 }
 
 #[tauri::command]
@@ -706,6 +785,8 @@ pub fn run() {
             hotkey_watcher_status,
             toggle_recording,
             cancel_recording,
+            paste_text_at_cursor,
+            retry_last,
             toggle_pause,
             list_mics,
             set_mic_device,
