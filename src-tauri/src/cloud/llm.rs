@@ -60,13 +60,15 @@ pub fn polish(
 /// Tone instructions for a session: an explicit pill override (styleOverride
 /// setting) wins over automatic per-app matching.
 fn resolve_style_instructions(db: &Store, app_identifier: &str) -> Result<Option<String>> {
-    if let Some(id) = db
-        .get_setting("styleOverride")
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str::<i64>(&v).ok())
-    {
-        return db.style_instructions_by_id(id);
+    if let Some(raw) = db.get_setting("styleOverride").ok().flatten() {
+        if let Ok(id) = serde_json::from_str::<i64>(&raw) {
+            return db.style_instructions_by_id(id);
+        }
+        // Explicit "no style" sentinel chosen in the pill: suppress even
+        // per-app matching instead of falling back to it.
+        if raw.trim() == "\"none\"" {
+            return Ok(None);
+        }
     }
     db.resolve_style_for_app(app_identifier)
 }

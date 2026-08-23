@@ -49,7 +49,9 @@ export default function FlowBar() {
   const [partial, setPartial] = useState<string | null>(null);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const [styles, setStyles] = useState<Style[]>([]);
-  const [styleOverride, setStyleOverride] = useState<number | null>(null);
+  const [styleOverride, setStyleOverride] = useState<
+    number | null | "none"
+  >(null);
   const [overrideLabel, setOverrideLabel] = useState<string | null>(null);
   const [style, setStyle] = useState<PillStyle>({
     shape: "pill",
@@ -244,7 +246,7 @@ export default function FlowBar() {
     try {
       const [list, current] = await Promise.all([
         api.listStyles(),
-        api.getSetting<number>("styleOverride"),
+        api.getSetting<number | "none">("styleOverride"),
       ]);
       setStyles(list.filter((st) => st.enabled));
       setStyleOverride(current ?? null);
@@ -259,7 +261,7 @@ export default function FlowBar() {
     }
   }
 
-  async function pickStyle(id: number | null) {
+  async function pickStyle(id: number | null | "none") {
     setStyleOverride(id);
     setOverrideLabel(
       id != null ? (styles.find((st) => st.id === id)?.label ?? null) : null,
