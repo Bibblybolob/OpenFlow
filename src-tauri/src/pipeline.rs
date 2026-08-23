@@ -20,6 +20,61 @@ const DOUBLE_TAP_WINDOW_MS: u64 = 700;
 /// away from the mic doesn't leave a giant accidental transcript behind.
 const HANDS_FREE_SILENCE_STOP_MS: u64 = 5000;
 const VOICE_LEVEL_THRESHOLD: f32 = 0.03;
+/// Raw-RMS ceiling under which a transcript is suspect: below this the mic
+/// captured essentially silence/room tone, so whisper-style models tend to
+/// confabulate stock phrases rather than transcribe speech.
+const ARTIFACT_RAW_RMS: f32 = 0.02;
+
+fn noise_suppression_enabled(db: &Store) -> bool {
+    db.get_setting("noiseSuppression")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<bool>(&v).ok())
+        .unwrap_or(true)
+}
+
+fn vad_sensitivity_mult(db: &Store) -> f32 {
+    match db
+        .get_setting("voiceSensitivity")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<String>(&v).ok())
+        .as_deref()
+    {
+        Some("low") => crate::audio::VAD_MULT_LOW,
+        Some("high") => crate::audio::VAD_MULT_HIGH,
+        _ => crate::audio::VAD_MULT_MEDIUM,
+    }
+}
+
+/// Classic whisper-family hallucinations on near-silence. Exact matches only,
+/// and gated on a low-energy recording, so genuine quiet dictation of these
+/// words still passes.
+fn is_whisper_artifact(text: &str) -> bool {
+    let normalized: String = text
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        normalized.as_str(),
+        "" | "thank you"
+            | "thank you bye"
+            | "thanks for watching"
+            | "thank you for watching"
+            | "thanks for watching bye"
+            | "bye"
+            | "bye bye"
+            | "you"
+    )
+}
 
 /// Broadcasts hotkey-watcher lifecycle to the webviews so the Hub can show
 /// "waiting for permission / ready / unavailable" instead of a silent dead
@@ -404,6 +459,7 @@ fn handler_loop(
                     }
                     current_app = inject::frontmost_app();
                     audio.set_device(mic_preference(&db));
+                    audio.set_processing(noise_suppression_enabled(&db), vad_sensitivity_mult(&db));
                     if let Err(e) = audio.start() {
                         // Never swallow this: a dead mic must look different
                         // from a dead hotkey, or users cannot tell them apart.
@@ -457,6 +513,10 @@ fn handler_loop(
                         audio.discard();
                         current_app = inject::frontmost_app();
                         audio.set_device(mic_preference(&db));
+                        audio.set_processing(
+                            noise_suppression_enabled(&db),
+                            vad_sensitivity_mult(&db),
+                        );
                         crate::begin_context_capture();
                         if let Err(e) = audio.start() {
                             fail(&app, &db, &state, format!("microphone unavailable: {e}"));
@@ -566,6 +626,7 @@ fn handler_loop(
                     pending_start = false;
                     current_app = inject::frontmost_app();
                     audio.set_device(mic_preference(&db));
+                    audio.set_processing(noise_suppression_enabled(&db), vad_sensitivity_mult(&db));
                     crate::begin_context_capture();
                     if let Err(e) = audio.start() {
                         fail(&app, &db, &state, format!("microphone unavailable: {e}"));
@@ -755,6 +816,21 @@ pub(crate) fn run_session(
         crate::store_retry_job(recording.wav, target_app);
         timings.report(app);
         return fail(app, db, state, "transcription came back empty".to_string());
+    }
+    // Hallucination guard: a near-silent capture that still produced text is
+    // model confabulation — drop it instead of pasting phantom words.
+    if recording.max_frame_rms < ARTIFACT_RAW_RMS && is_whisper_artifact(&raw_text) {
+        eprintln!(
+            "artifact guard: dropped quiet-session text {:?} (rms {:.4})",
+            raw_text, recording.max_frame_rms
+        );
+        timings.report(app);
+        emit_warning(
+            app,
+            "no speech detected — ignored a phantom transcription".to_string(),
+        );
+        transition(app, db, state, PipelineState::Idle, None, None);
+        return;
     }
     crate::clear_retry_job();
 
@@ -950,4 +1026,22 @@ fn emit_warning(app: &AppHandle, message: String) {
 
 fn db_prompt(db: &Store) -> String {
     stt::build_prompt(db).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_matcher_catches_stock_phrases_only() {
+        assert!(is_whisper_artifact("Thank you."));
+        assert!(is_whisper_artifact("Thanks for watching!"));
+        assert!(is_whisper_artifact("Bye"));
+        assert!(is_whisper_artifact("  you "));
+        assert!(is_whisper_artifact(""));
+        // Real dictation of the same words must NOT be flagged when the
+        // energy gate passes it through with more content.
+        assert!(!is_whisper_artifact("thank you for the quick review"));
+        assert!(!is_whisper_artifact("bye everyone, see you tomorrow"));
+    }
 }

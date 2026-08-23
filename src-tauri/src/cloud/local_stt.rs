@@ -201,6 +201,9 @@ pub fn transcribe_local(
         Some(language)
     });
     params.set_no_context(true);
+    // Blank-result suppression: without it whisper emits empty/"you" style
+    // segments over silence.
+    params.set_suppress_blank(true);
     params.set_print_progress(false);
     params.set_print_special(false);
     params.set_print_realtime(false);

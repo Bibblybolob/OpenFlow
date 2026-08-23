@@ -401,6 +401,9 @@ fn retry_last(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<bo
             crate::audio::Recording {
                 duration_ms: 0,
                 wav: job.wav,
+                // Retried jobs predate per-session metering; treat as
+                // clearly-voiced so the artifact guard never eats a retry.
+                max_frame_rms: 1.0,
             },
             job.target_app,
         );

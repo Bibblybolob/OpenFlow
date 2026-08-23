@@ -57,6 +57,8 @@ export default function Settings({
   const [mics, setMics] = useState<string[]>([]);
   const [mic, setMic] = useState<string>("");
   const [soundEffects, setSoundEffects] = useState(true);
+  const [noiseSuppression, setNoiseSuppression] = useState(true);
+  const [voiceSensitivity, setVoiceSensitivity] = useState("medium");
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -121,6 +123,8 @@ export default function Settings({
     const micList = await api.listMics().catch(() => [] as string[]);
     const micPref = await api.getSetting<string>("micDevice");
     const se = await api.getSetting<boolean>("soundEffects");
+    const ns = await api.getSetting<boolean>("noiseSuppression");
+    const vs = await api.getSetting<string>("voiceSensitivity");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
@@ -145,6 +149,8 @@ export default function Settings({
     setMics(micList);
     setMic(micPref ?? "");
     setSoundEffects(se ?? true);
+    setNoiseSuppression(ns ?? true);
+    setVoiceSensitivity(vs ?? "medium");
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
@@ -268,6 +274,17 @@ export default function Settings({
     }
   }
 
+  async function toggleNoiseSuppression() {
+    const next = !noiseSuppression;
+    setNoiseSuppression(next);
+    await api.setSetting("noiseSuppression", next);
+  }
+
+  async function changeVoiceSensitivity(v: string) {
+    setVoiceSensitivity(v);
+    await api.setSetting("voiceSensitivity", v);
+  }
+
   async function toggleSoundEffects() {
     const next = !soundEffects;
     setSoundEffects(next);
@@ -389,6 +406,26 @@ export default function Settings({
           ]}
           onChange={changeMic}
         />
+        <ToggleRow
+          label="Noise suppression"
+          hint="RNNoise-style model removes keyboard, fan and room noise before transcription"
+          checked={noiseSuppression}
+          onChange={toggleNoiseSuppression}
+        />
+        <SelectRow
+          label="Voice sensitivity"
+          value={voiceSensitivity}
+          options={[
+            { value: "low", label: "Low — noisy rooms" },
+            { value: "medium", label: "Medium (recommended)" },
+            { value: "high", label: "High — only clear speech" },
+          ]}
+          onChange={changeVoiceSensitivity}
+        />
+        <p className="text-xs text-neutral-600">
+          Recordings where no voice clears the noise floor are discarded
+          instead of transcribed, preventing phantom text from silence.
+        </p>
         <ToggleRow
           label="Launch at login"
           hint="Start FlowClone automatically when you sign in"
