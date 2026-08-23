@@ -36,6 +36,15 @@ export interface Style {
   appPattern: string;
   label: string;
   instructions: string;
+  language?: string | null;
   enabled: boolean;
+  createdAt: string;
+}
+
+export interface VocabSuggestion {
+  id: number;
+  rawForm: string;
+  term: string;
+  occurrences: number;
   createdAt: string;
 }

@@ -12,6 +12,7 @@ import {
   shade,
   type PillStyle,
 } from "../lib/pillStyle";
+import type { Style } from "../lib/types";
 
 type State = "idle" | "recording" | "transcribing" | "injecting" | "paused";
 
@@ -44,6 +45,10 @@ export default function FlowBar() {
   const [hotkeyHint, setHotkeyHint] = useState("Right Shift");
   const [hovering, setHovering] = useState(false);
   const [micSilent, setMicSilent] = useState(false);
+  const [styleMenuOpen, setStyleMenuOpen] = useState(false);
+  const [styles, setStyles] = useState<Style[]>([]);
+  const [styleOverride, setStyleOverride] = useState<number | null>(null);
+  const [overrideLabel, setOverrideLabel] = useState<string | null>(null);
   const [style, setStyle] = useState<PillStyle>({
     shape: "pill",
     accent: "indigo",
@@ -226,6 +231,40 @@ export default function FlowBar() {
     }
   }
 
+  async function openStyleMenu(e: React.MouseEvent) {
+    e.preventDefault();
+    if (stateRef.current !== "idle") return;
+    try {
+      const [list, current] = await Promise.all([
+        api.listStyles(),
+        api.getSetting<number>("styleOverride"),
+      ]);
+      setStyles(list.filter((st) => st.enabled));
+      setStyleOverride(current ?? null);
+      setOverrideLabel(
+        current != null
+          ? (list.find((st) => st.id === current)?.label ?? "Custom")
+          : null,
+      );
+      setStyleMenuOpen(true);
+    } catch {
+      // best effort only
+    }
+  }
+
+  async function pickStyle(id: number | null) {
+    setStyleOverride(id);
+    setOverrideLabel(
+      id != null ? (styles.find((st) => st.id === id)?.label ?? null) : null,
+    );
+    setStyleMenuOpen(false);
+    try {
+      await api.setSetting("styleOverride", id);
+    } catch {
+      // best effort only
+    }
+  }
+
   async function onPauseClick() {
     try {
       await api.togglePause();
@@ -263,12 +302,51 @@ export default function FlowBar() {
         onAnimationComplete={onHiddenAnimationDone}
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
+        onContextMenu={openStyleMenu}
         className={`relative flex items-center gap-3 ${radius} border px-4 py-2 shadow-2xl backdrop-blur-xl`}
         style={{
           background: pillBackground(mode, style.opacity),
           borderColor,
         }}
       >
+        {styleMenuOpen && (
+          <div className="absolute bottom-full left-1/2 z-10 mb-2 w-48 -translate-x-1/2 rounded-xl border border-white/10 bg-[#17171c]/95 p-1 shadow-2xl backdrop-blur-xl">
+            {(
+              [
+                [null, "Auto (match app)"],
+                [-1, "No style"],
+              ] as [number | null, string][]
+            ).map(([id, label]) => (
+              <button
+                key={label}
+                onClick={() => pickStyle(id)}
+                className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-xs text-neutral-300 transition hover:bg-white/10"
+              >
+                {label}
+                {(id === null && styleOverride === null) ||
+                (id === -1 && false) ? (
+                  <span className="text-indigo-400">✓</span>
+                ) : null}
+              </button>
+            ))}
+            {styles.length > 0 && (
+              <div className="my-1 border-t border-white/5" />
+            )}
+            {styles.map((st) => (
+              <button
+                key={st.id}
+                onClick={() => pickStyle(st.id)}
+                className="flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-left text-xs text-neutral-300 transition hover:bg-white/10"
+              >
+                <span className="truncate">{st.label}</span>
+                {styleOverride === st.id && (
+                  <span className="text-indigo-400">✓</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
         {recording && style.animations && (
           <motion.span
             aria-hidden
@@ -383,7 +461,9 @@ export default function FlowBar() {
           >
             {hasError
               ? (errorText ?? "Error — check Hub")
-              : `Hold ${hotkeyHint} or click`}
+              : overrideLabel
+                ? `Style: ${overrideLabel}`
+                : `Hold ${hotkeyHint} or click`}
           </span>
         )}
 

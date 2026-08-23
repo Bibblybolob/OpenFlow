@@ -15,6 +15,7 @@ import {
   type PillShape,
   type PillStyle,
 } from "../../lib/pillStyle";
+import { LANGUAGES } from "../../lib/languages";
 
 type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter";
 type SttProviderChoice = "openai" | "openrouter" | "local";
@@ -25,28 +26,6 @@ interface LocalModelInfo {
   approxMb: number;
   downloaded: boolean;
 }
-
-const LANGUAGES: { code: string; label: string }[] = [
-  { code: "auto", label: "Auto-detect" },
-  { code: "en", label: "English" },
-  { code: "es", label: "Español" },
-  { code: "fr", label: "Français" },
-  { code: "de", label: "Deutsch" },
-  { code: "pt", label: "Português" },
-  { code: "it", label: "Italiano" },
-  { code: "nl", label: "Nederlands" },
-  { code: "pl", label: "Polski" },
-  { code: "tr", label: "Türkçe" },
-  { code: "ru", label: "Русский" },
-  { code: "uk", label: "Українська" },
-  { code: "ar", label: "العربية" },
-  { code: "hi", label: "हिन्दी" },
-  { code: "zh", label: "中文" },
-  { code: "ja", label: "日本語" },
-  { code: "ko", label: "한국어" },
-  { code: "vi", label: "Tiếng Việt" },
-  { code: "th", label: "ไทย" },
-];
 
 export default function Settings({
   onRerunSetup,

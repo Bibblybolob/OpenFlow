@@ -77,6 +77,9 @@ pub struct Style {
     pub app_pattern: String,
     pub label: String,
     pub instructions: String,
+    /// Optional transcription language pinned to this app (e.g. "es").
+    /// None = follow the global language setting.
+    pub language: Option<String>,
     pub enabled: bool,
     pub created_at: String,
 }
@@ -137,7 +140,8 @@ CREATE TABLE IF NOT EXISTS styles (
     label        TEXT NOT NULL,
     instructions TEXT NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
-    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    language     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -152,6 +156,9 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA)?;
+        // Migration for databases created before per-app languages existed.
+        // Fresh schemas already carry the column; the ALTER fails harmlessly.
+        let _ = conn.execute("ALTER TABLE styles ADD COLUMN language TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -463,12 +470,15 @@ impl Store {
         app_pattern: &str,
         label: &str,
         instructions: &str,
+        language: Option<&str>,
     ) -> Result<Style> {
+        let language = language.map(str::to_string);
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO styles (app_pattern, label, instructions) VALUES (?1, ?2, ?3)
-             ON CONFLICT(app_pattern) DO UPDATE SET label = excluded.label, instructions = excluded.instructions",
-            params![app_pattern.trim().to_lowercase(), label, instructions],
+            "INSERT INTO styles (app_pattern, label, instructions, language) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(app_pattern) DO UPDATE SET label = excluded.label,
+                 instructions = excluded.instructions, language = excluded.language",
+            params![app_pattern.trim().to_lowercase(), label, instructions, language],
         )?;
         let id = conn.last_insert_rowid();
         Ok(Style {
@@ -476,6 +486,7 @@ impl Store {
             app_pattern: app_pattern.trim().to_lowercase(),
             label: label.to_string(),
             instructions: instructions.to_string(),
+            language,
             enabled: true,
             created_at: now_iso(&conn)?,
         })
@@ -484,7 +495,7 @@ impl Store {
     pub fn list_styles(&self) -> Result<Vec<Style>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, app_pattern, label, instructions, enabled, created_at
+            "SELECT id, app_pattern, label, instructions, enabled, created_at, language
              FROM styles ORDER BY app_pattern ASC",
         )?;
         let rows = stmt.query_map([], map_style)?;
@@ -495,13 +506,35 @@ impl Store {
     /// patterns contained in the identifier, the most specific (longest) wins,
     /// e.g. "com.apple.mail" beats "mail".
     pub fn resolve_style_for_app(&self, app_identifier: &str) -> Result<Option<String>> {
+        Ok(self
+            .resolve_style_full(app_identifier)?
+            .map(|(instructions, _)| instructions))
+    }
+
+    /// Full per-app match: (instructions, optional pinned language).
+    pub fn resolve_style_full(
+        &self,
+        app_identifier: &str,
+    ) -> Result<Option<(String, Option<String>)>> {
         let needle = app_identifier.to_lowercase();
         let all = self.list_styles()?;
         Ok(all
             .iter()
             .filter(|s| s.enabled && !s.app_pattern.is_empty() && needle.contains(&s.app_pattern))
             .max_by_key(|s| s.app_pattern.len())
-            .map(|s| s.instructions.clone()))
+            .map(|s| (s.instructions.clone(), s.language.clone())))
+    }
+
+    /// Instructions for an exact style id (the pill's manual override path).
+    pub fn style_instructions_by_id(&self, id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT instructions FROM styles WHERE id = ?1 AND enabled = 1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     pub fn set_style_enabled(&self, id: i64, enabled: bool) -> Result<()> {
@@ -564,6 +597,7 @@ fn map_style(row: &rusqlite::Row<'_>) -> rusqlite::Result<Style> {
         instructions: row.get(3)?,
         enabled: row.get::<_, i64>(4)? != 0,
         created_at: row.get(5)?,
+        language: row.get(6)?,
     })
 }
 
@@ -686,7 +720,7 @@ mod tests {
     fn style_resolves_by_substring_case_insensitive() {
         let store = memory_store();
         store
-            .upsert_style("com.apple.mail", "Email formal", "Formal tone")
+            .upsert_style("com.apple.mail", "Email formal", "Formal tone", None)
             .unwrap();
         assert_eq!(
             store
@@ -705,10 +739,10 @@ mod tests {
     fn style_most_specific_pattern_wins() {
         let store = memory_store();
         store
-            .upsert_style("mail", "Mail generic", "Generic tone")
+            .upsert_style("mail", "Mail generic", "Generic tone", Some("es"))
             .unwrap();
         store
-            .upsert_style("com.apple.mail", "Apple Mail", "Apple-specific tone")
+            .upsert_style("com.apple.mail", "Apple Mail", "Apple-specific tone", None)
             .unwrap();
         assert_eq!(
             store
@@ -725,6 +759,25 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn style_language_roundtrips_and_resolves_per_app() {
+        let store = memory_store();
+        store
+            .upsert_style("whatsapp", "Spanish chat", "Casual tone", Some("es"))
+            .unwrap();
+        let (instructions, lang) = store
+            .resolve_style_full("net.whatsapp.Whatsapp")
+            .unwrap()
+            .unwrap();
+        assert_eq!(instructions, "Casual tone");
+        assert_eq!(lang.as_deref(), Some("es"));
+        // Apps without a match resolve to nothing.
+        assert!(store
+            .resolve_style_full("com.apple.mail")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -221,9 +221,15 @@ fn upsert_style(
     app_pattern: String,
     label: String,
     instructions: String,
+    language: Option<String>,
 ) -> store::Result<store::Style> {
     with_db(&state, |db| {
-        db.upsert_style(&app_pattern, &label, &instructions)
+        db.upsert_style(
+            &app_pattern,
+            &label,
+            &instructions,
+            language.as_deref().filter(|l| !l.is_empty()),
+        )
     })
 }
 

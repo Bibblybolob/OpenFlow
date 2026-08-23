@@ -1,14 +1,16 @@
 import { useEffect, useState } from "react";
 import { api } from "../../lib/ipc";
-import type { DictionaryEntry } from "../../lib/types";
+import type { DictionaryEntry, VocabSuggestion } from "../../lib/types";
 
 export default function Dictionary() {
   const [entries, setEntries] = useState<DictionaryEntry[]>([]);
+  const [suggestions, setSuggestions] = useState<VocabSuggestion[]>([]);
   const [term, setTerm] = useState("");
   const [replacement, setReplacement] = useState("");
 
   async function refresh() {
     setEntries(await api.listDictionary());
+    setSuggestions(await api.listVocabSuggestions().catch(() => []));
   }
 
   useEffect(() => {
@@ -32,6 +34,51 @@ export default function Dictionary() {
           replacement to auto-correct a common misspelling.
         </p>
       </div>
+
+      {suggestions.length > 0 && (
+        <section className="flex flex-col gap-2 rounded-xl border border-amber-400/20 bg-amber-400/[0.04] p-4">
+          <h2 className="text-xs font-medium uppercase tracking-wider text-amber-300/80">
+            Learned vocabulary — needs review
+          </h2>
+          <p className="text-xs text-neutral-500">
+            Flow heard these corrections more than once. Accept to always
+            spell them this way.
+          </p>
+          {suggestions.map((s) => (
+            <div
+              key={s.id}
+              className="flex items-center justify-between gap-4 rounded-lg bg-white/[0.03] px-3 py-2"
+            >
+              <div className="min-w-0 text-sm">
+                <span className="text-neutral-200">{s.term}</span>
+                <span className="ml-2 text-xs text-neutral-600">
+                  heard as “{s.rawForm}” · {s.occurrences}×
+                </span>
+              </div>
+              <div className="flex shrink-0 gap-1">
+                <button
+                  onClick={async () => {
+                    await api.acceptVocabSuggestion(s.id);
+                    refresh();
+                  }}
+                  className="rounded-md bg-emerald-500/20 px-2.5 py-1 text-xs text-emerald-300 transition hover:bg-emerald-500/30"
+                >
+                  Accept
+                </button>
+                <button
+                  onClick={async () => {
+                    await api.dismissVocabSuggestion(s.id);
+                    refresh();
+                  }}
+                  className="rounded-md px-2.5 py-1 text-xs text-neutral-500 transition hover:bg-white/5"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
 
       <div className="flex gap-2">
         <input

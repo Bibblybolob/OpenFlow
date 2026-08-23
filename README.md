@@ -15,7 +15,10 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **AI cleanup** — GPT-4o-mini (OpenAI), Claude (Anthropic), or any model via OpenRouter rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), backtrack handling.
 - **Pluggable LLM providers** — bring an OpenAI, Claude, OpenRouter, or mix of keys; auto-detect or force a provider per your preference.
 - **Voice commands** — say "open youtube", "search rust async", or "copy …" to act instead of typing (toggleable).
-- **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct.
+- **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct. Flow also **learns vocabulary on its own**: it diffs raw speech against the cleaned text, silently adopts recurring proper-noun fixes, and queues uncertain ones for one-click review on the Dictionary page.
+- **Backtrack handling & emoji commands** — mid-sentence "wait / actually / never mind" corrections collapse to your final intent, and spoken emoji requests ("insert party emoji") render the real thing.
+- **Per-app languages** — pin a transcription language to an app rule (e.g. Spanish in WhatsApp); it overrides the global setting for that app only.
+- **Quick style override** — right-click the pill to force a tone for this session (or back to per-app matching), without touching Settings.
 - **Snippets** — voice shortcuts that expand to full text locally, with zero API latency on exact matches.
 - **Per-app styles** — tone instructions matched against the frontmost app's bundle identifier (e.g., formal in Mail, casual in Slack).
 - **Flow Bar** — floating, focus-safe pill with an always-on live waveform (real mic levels, independent of the animations setting) plus a "mic silent?" alert when the capture stream hears nothing for 2s — so you always know whether the pill is actually listening; click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.

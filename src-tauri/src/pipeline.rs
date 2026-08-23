@@ -666,13 +666,20 @@ fn run_session(
     let mut timings = StageTimings::begin();
     transition(app, db, state, PipelineState::Transcribing, None, None);
 
-    let language = {
-        let raw = db.get_setting("language").ok().flatten();
-        match raw.and_then(|v| serde_json::from_str::<String>(&v).ok()) {
-            Some(lang) => lang,
-            None => "auto".to_string(),
-        }
-    };
+    // Language precedence: a matching per-app style's pinned language wins;
+    // otherwise the global setting ("auto" by default).
+    let style_info = db.resolve_style_full(&target_app).ok().flatten();
+    let language = style_info
+        .as_ref()
+        .and_then(|(_, lang)| lang.clone())
+        .or_else(|| {
+            db.get_setting("language")
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str::<String>(&v).ok())
+                .filter(|l| !l.is_empty() && l != "auto")
+        })
+        .unwrap_or_else(|| "auto".to_string());
 
     let result = stt::transcribe(db, &recording.wav, &language, Some(&db_prompt(db)));
     let stt_started = timings.mark("wav-encode+prep", timings.started);

@@ -9,18 +9,16 @@ const MAX_PROMPT_CHARS: usize = 6_000;
 
 pub const SYSTEM_PROMPT: &str = "You clean up raw speech-to-text dictation. Rewrite the dictated text as polished written prose.\n\
 Rules:\n\
-- Remove filler words (\"um\", \"uh\", \"you know\") and false starts; when the speaker self-corrects mid-sentence, keep only their final intent.\n\
+- Remove filler words (\"um\", \"uh\", \"you know\").\n- When the speaker changes their mind mid-sentence — \"wait\", \"actually\", \"never mind\", \"or rather\", or simply restarting a sentence — keep only the final intent and drop every abandoned word. Example: \"send it to John wait no to Jane tomorrow\" becomes \"Send it to Jane tomorrow.\"\n\
 - Add correct punctuation, capitalization, and paragraph breaks.\n\
 - Honor spoken formatting commands: \"new line\", \"new paragraph\", \"bullet list\", \"numbered list\".\n\
 - Preserve the input language, meaning, tone, and any code-like tokens or file paths.\n\
-- Use the preferred vocabulary exactly as given for names and terms.\n\
+- Use the preferred vocabulary exactly as given for names and terms.\n- Honor spoken emoji requests: \"insert party emoji\" appends 🎉 at that spot; without such a request, never add emojis.\n\
 - Never answer the content, never add information, never comment. Output ONLY the cleaned text.";
 
 pub fn polish(db: &Store, raw_text: &str, app_identifier: &str) -> Result<String> {
     let cfg = resolve_config(db)?;
-    let style = db
-        .resolve_style_for_app(app_identifier)?
-        .unwrap_or_default();
+    let style = resolve_style_instructions(db, app_identifier)?.unwrap_or_default();
     let body = build_request_body(cfg.provider, &cfg.model, raw_text, &style, db)?;
 
     let req = match cfg.provider {
@@ -52,6 +50,20 @@ pub fn polish(db: &Store, raw_text: &str, app_identifier: &str) -> Result<String
     }
 
     extract_text(cfg.provider, &text)
+}
+
+/// Tone instructions for a session: an explicit pill override (styleOverride
+/// setting) wins over automatic per-app matching.
+fn resolve_style_instructions(db: &Store, app_identifier: &str) -> Result<Option<String>> {
+    if let Some(id) = db
+        .get_setting("styleOverride")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<i64>(&v).ok())
+    {
+        return db.style_instructions_by_id(id);
+    }
+    db.resolve_style_for_app(app_identifier)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +290,13 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_handles_backtracks_and_emoji_requests() {
+        assert!(SYSTEM_PROMPT.contains("never mind"));
+        assert!(SYSTEM_PROMPT.contains("final intent"));
+        assert!(SYSTEM_PROMPT.contains("emoji"));
+    }
     use crate::store::Store;
 
     fn store() -> Store {

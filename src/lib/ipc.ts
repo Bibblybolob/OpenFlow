@@ -5,6 +5,7 @@ import type {
   Stats,
   Style,
   Transcript,
+  VocabSuggestion,
 } from "./types";
 
 export const api = {
@@ -50,6 +51,14 @@ export const api = {
   deleteDictionaryTerm: (id: number) =>
     invoke<void>("delete_dictionary_term", { id }),
 
+  listVocabSuggestions: () => invoke<VocabSuggestion[]>("list_vocab_suggestions"),
+
+  acceptVocabSuggestion: (id: number) =>
+    invoke<void>("accept_vocab_suggestion", { id }),
+
+  dismissVocabSuggestion: (id: number) =>
+    invoke<void>("dismiss_vocab_suggestion", { id }),
+
   addSnippet: (trigger: string, body: string) =>
     invoke<Snippet>("add_snippet", { trigger, body }),
 
@@ -57,8 +66,18 @@ export const api = {
 
   deleteSnippet: (id: number) => invoke<void>("delete_snippet", { id }),
 
-  upsertStyle: (appPattern: string, label: string, instructions: string) =>
-    invoke<Style>("upsert_style", { appPattern, label, instructions }),
+  upsertStyle: (
+    appPattern: string,
+    label: string,
+    instructions: string,
+    language?: string | null,
+  ) =>
+    invoke<Style>("upsert_style", {
+      appPattern,
+      label,
+      instructions,
+      language: language ?? null,
+    }),
 
   listStyles: () => invoke<Style[]>("list_styles"),
 
