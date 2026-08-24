@@ -61,6 +61,7 @@ export default function Settings({
   const [voiceSensitivity, setVoiceSensitivity] = useState("medium");
   const [hotkeyMode, setHotkeyMode] = useState("toggle");
   const [liveCommit, setLiveCommit] = useState(false);
+  const [sttModel, setSttModel] = useState("gpt-4o-mini-transcribe");
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -129,6 +130,7 @@ export default function Settings({
     const vs = await api.getSetting<string>("voiceSensitivity");
     const hmode = await api.getSetting<string>("hotkeyMode");
     const lc = await api.getSetting<boolean>("liveCommit");
+    const sm = await api.getSetting<string>("sttModel");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
@@ -157,6 +159,7 @@ export default function Settings({
     setVoiceSensitivity(vs ?? "medium");
     setHotkeyMode(hmode ?? "toggle");
     setLiveCommit(lc ?? false);
+    setSttModel(sm ?? "gpt-4o-mini-transcribe");
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
@@ -286,6 +289,11 @@ export default function Settings({
     await api.setSetting("noiseSuppression", next);
   }
 
+  async function changeSttModel(v: string) {
+    setSttModel(v);
+    await api.setSetting("sttModel", v);
+  }
+
   async function toggleLiveCommit() {
     const next = !liveCommit;
     setLiveCommit(next);
@@ -401,6 +409,15 @@ export default function Settings({
             options={hotkeyOptions.map((k) => ({ value: k, label: k }))}
             onChange={(v) => changeHotkey(v)}
           />
+        <SelectRow
+          label="Accuracy"
+          value={sttModel}
+          options={[
+            { value: "gpt-4o-mini-transcribe", label: "Fast — gpt-4o-mini-transcribe" },
+            { value: "gpt-4o-transcribe", label: "Most accurate — gpt-4o-transcribe" },
+          ]}
+          onChange={changeSttModel}
+        />
         <SelectRow
           label="Activation"
           value={hotkeyMode}

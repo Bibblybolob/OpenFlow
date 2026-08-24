@@ -459,6 +459,28 @@ pub fn build_prompt(db: &Store) -> Result<String> {
             break;
         }
     }
+    // Continuity: seed with the tail of the most recent dictation so names,
+    // phrasing and topic carry across consecutive sessions.
+    if prompt.len() < 420 {
+        if let Some(last) = db
+            .list_transcripts(1, 0)
+            .ok()
+            .and_then(|v| v.first().map(|t| t.text.clone()))
+        {
+            let tail: String = last
+                .chars()
+                .rev()
+                .take(200)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !prompt.is_empty() && !tail.is_empty() {
+                prompt.push(' ');
+            }
+            prompt.push_str(tail.trim());
+        }
+    }
     Ok(prompt.trim().to_string())
 }
 

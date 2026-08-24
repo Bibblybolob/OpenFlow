@@ -848,7 +848,12 @@ fn finish_session(
                 let _ = done_tx.send(Msg::SessionDone);
             });
         }
-        Ok(None) => transition(app, db, state, PipelineState::Idle, None, None),
+        Ok(None) => {
+            if let Some(note) = audio.take_discard_note() {
+                emit_warning(app, note);
+            }
+            transition(app, db, state, PipelineState::Idle, None, None);
+        }
         Err(e) => fail(app, db, state, e.to_string()),
     }
 }
@@ -1190,13 +1195,14 @@ fn process_sentence_chunk(
     chunk: crate::audio::SentenceChunk,
 ) {
     let mult = vad_sensitivity_mult(&db);
+    let normalized = crate::audio::normalize_loudness(chunk.samples);
     let (work, work_rate) = if noise_suppression_enabled(&db) {
         (
-            crate::audio::suppress_noise(&chunk.samples, chunk.sample_rate),
+            crate::audio::suppress_noise(&normalized, chunk.sample_rate),
             48_000,
         )
     } else {
-        (chunk.samples, chunk.sample_rate)
+        (normalized, chunk.sample_rate)
     };
     let regions = crate::audio::voice_regions(&work, work_rate, mult);
     if regions.voiced_ms < 300 || regions.segments.is_empty() {

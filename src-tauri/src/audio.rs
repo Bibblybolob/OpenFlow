@@ -14,6 +14,33 @@ pub(crate) const TARGET_SAMPLE_RATE: u32 = 16_000;
 /// accidental/noisy press, not dictation.
 const MIN_VOICED_MS: u32 = 300;
 
+/// Loudness normalization target (~ -20 dBFS RMS). Quiet mics deliver
+/// whisper-level PCM that RNNoise and STT models both misread as noise —
+/// the #1 cause of empty/mangled transcriptions.
+const NORMALIZE_TARGET_RMS: f32 = 0.10;
+/// Never boost beyond this, so pure digital silence stays silent.
+const NORMALIZE_MAX_GAIN: f32 = 24.0;
+
+/// Brings a capture up to speaking level before conditioning/upload.
+/// Boost-only (attenuation is never needed), soft-limited to avoid clips.
+pub(crate) fn normalize_loudness(mut samples: Vec<f32>) -> Vec<f32> {
+    if samples.is_empty() {
+        return samples;
+    }
+    let rms = (samples.iter().map(|x| x * x).sum::<f32>() / samples.len() as f32).sqrt();
+    if !rms.is_finite() || rms < 1e-5 {
+        return samples;
+    }
+    let gain = (NORMALIZE_TARGET_RMS / rms).min(NORMALIZE_MAX_GAIN);
+    if gain <= 1.01 {
+        return samples;
+    }
+    for s in &mut samples {
+        *s = (*s * gain).clamp(-0.98, 0.98);
+    }
+    samples
+}
+
 /// Natural-speech flow: while a session is capturing, this much trailing
 /// silence after voiced content finalizes the current sentence span and
 /// ships it upstream for immediate transcription+paste. Capture continues.
@@ -97,9 +124,9 @@ pub struct Recording {
 
 /// How far above the tracked noise floor audio must climb to count as
 /// voice. Maps to the Settings sensitivity preset (Low/Medium/High).
-pub const VAD_MULT_LOW: f32 = 2.5;
-pub const VAD_MULT_MEDIUM: f32 = 3.5;
-pub const VAD_MULT_HIGH: f32 = 5.0;
+pub const VAD_MULT_LOW: f32 = 2.0;
+pub const VAD_MULT_MEDIUM: f32 = 2.5;
+pub const VAD_MULT_HIGH: f32 = 4.0;
 
 /// Segments of a recording that cleared the adaptive voice gate.
 pub struct VoiceRegions {
@@ -120,6 +147,7 @@ pub struct AudioEngine {
     noise_suppression: bool,
     vad_mult: f32,
     chunk_tx: Option<std::sync::mpsc::SyncSender<SentenceChunk>>,
+    discard_note: Option<String>,
 }
 
 /// Names of every input device on the default host, for the Settings picker.
@@ -155,7 +183,14 @@ impl AudioEngine {
             noise_suppression: true,
             vad_mult: VAD_MULT_MEDIUM,
             chunk_tx: None,
+            discard_note: None,
         }
+    }
+
+    /// Why the most recent [`Self::stop`] returned `None`, if it explained
+    /// itself (vs an accidental tap). Consumed on read.
+    pub fn take_discard_note(&mut self) -> Option<String> {
+        self.discard_note.take()
     }
 
     /// Enables natural-speech flow: finished sentence spans are shipped as
@@ -305,6 +340,12 @@ impl AudioEngine {
             return Ok(None);
         }
 
+        self.discard_note = None;
+
+        // Stage 0 — loudness normalization: lift quiet captures into the
+        // range every downstream stage was trained on.
+        let samples = normalize_loudness(samples);
+
         // Stage A — neural noise suppression (RNNoise family): keyboard,
         // fan and room noise drop before anything downstream sees them.
         let mut work = samples;
@@ -324,8 +365,13 @@ impl AudioEngine {
                 "voice isolation: discarded {}ms session ({}ms voiced below floor)",
                 elapsed_ms, regions.voiced_ms
             );
+            self.discard_note = Some("no speech detected".to_string());
             return Ok(None);
         }
+        eprintln!(
+            "upload: {}ms session, {}ms voiced, peak rms {:.3}",
+            elapsed_ms, regions.voiced_ms, regions.max_rms
+        );
         let cropped: Vec<f32> = regions
             .segments
             .iter()
@@ -488,9 +534,9 @@ pub(crate) fn voice_regions(samples: &[f32], sample_rate: u32, mult: f32) -> Voi
     let floor = sorted[sorted.len() / 10];
     let enter = (floor * mult).max(0.006);
     let exit = enter * 0.45;
-    let hangover_frames = 12; // ~250ms
+    let hangover_frames = 15; // ~300ms
 
-    let pad = 6; // ±120ms
+    let pad = 8; // ±160ms
     let mut segments: Vec<(usize, usize)> = Vec::new();
     let mut in_voice = false;
     let mut seg_start = 0usize;
@@ -864,6 +910,37 @@ mod tests {
         maybe_emit_chunk(&mut s, &Some(tx));
         assert!(rx.try_recv().is_err(), "below threshold must not emit");
         assert_eq!(s.samples.len(), 1000, "buffer untouched");
+    }
+
+    #[test]
+    fn normalize_boosts_quiet_captures_to_target() {
+        let rate = 48_000usize;
+        let input: Vec<f32> = (0..rate)
+            .map(|i| ((i as f32) / 90.0).sin() * 0.02) // rms ~0.014
+            .collect();
+        let out = normalize_loudness(input);
+        let rms = (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(
+            rms > 0.07 && rms <= 0.12,
+            "quiet capture not lifted to target: {rms}"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_healthy_levels_and_silence_alone() {
+        let loud: Vec<f32> = vec![0.3; 1000];
+        assert_eq!(normalize_loudness(loud.clone()), loud, "no attenuation");
+        let quiet_noise: Vec<f32> = vec![1e-7; 1000];
+        assert_eq!(normalize_loudness(quiet_noise.clone()), quiet_noise);
+    }
+
+    #[test]
+    fn normalize_clamps_instead_of_clipping() {
+        // Mixed: mostly silence with a few hot samples — gain is capped.
+        let mut input = vec![0.001f32; 10_000];
+        input[0] = 0.9;
+        let out = normalize_loudness(input);
+        assert!(out.iter().all(|s| s.abs() <= 0.98));
     }
 
     #[test]
