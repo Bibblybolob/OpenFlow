@@ -40,6 +40,33 @@ export default function Home() {
 
   const watcherReady = watcher === "ready";
 
+  const watcherBanner = (() => {
+    switch (true) {
+      case watcher.startsWith("unavailable"):
+        return {
+          title: "Hotkey inactive — backend unavailable",
+          detail: watcher.replace("unavailable:", ""),
+        };
+      case watcher === "waiting-accessibility":
+        return {
+          title: "Hotkey inactive — grant Accessibility",
+          detail:
+            "Click to open System Settings → Privacy → Accessibility, add FlowClone and enable it",
+        };
+      case watcher === "waiting-input-monitoring":
+        return {
+          title: "Hotkey inactive — grant Input Monitoring",
+          detail:
+            "Click to open System Settings → Privacy → Input Monitoring, add FlowClone and enable it",
+        };
+      default:
+        return {
+          title: "Hotkey inactive — starting…",
+          detail: "",
+        };
+    }
+  })();
+
   async function onSearch(q: string) {
     setQuery(q);
     setTranscripts(
@@ -78,20 +105,19 @@ export default function Home() {
       {!watcherReady && (
         <button
           onClick={() => {
-            api.openInputMonitoringSettings().catch(() => {});
+            (watcher === "waiting-accessibility"
+              ? api.openAccessibilitySettings()
+              : api.openInputMonitoringSettings()
+            ).catch(() => {});
           }}
           className="flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-left transition hover:bg-amber-500/[0.16]"
         >
           <span>
             <span className="block text-sm font-medium text-amber-200">
-              {watcher === "waiting-permissions"
-                ? "Hotkey inactive — grant Input Monitoring"
-                : "Hotkey inactive — watcher unavailable"}
+              {watcherBanner.title}
             </span>
             <span className="mt-0.5 block text-xs text-amber-200/70">
-              {watcher === "waiting-permissions"
-                ? "Click to open System Settings, add FlowClone, then relaunch the app"
-                : watcher}
+              {watcherBanner.detail}
             </span>
           </span>
           <span className="text-xs font-medium text-amber-300">Fix →</span>

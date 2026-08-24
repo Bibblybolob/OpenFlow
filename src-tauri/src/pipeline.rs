@@ -8,9 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioEngine;
 use crate::cloud::{llm, stt};
-use crate::hotkey::{
-    HotkeyEvent, HotkeyWatcher, PushToTalkWatcher, SharedHotkeyConfig, WatcherStatus,
-};
+use crate::hotkey::{HotkeyEvent, SharedHotkeyConfig};
 use crate::inject;
 use crate::store::{Store, Transcript};
 
@@ -175,29 +173,24 @@ impl Pipeline {
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
         {
-            // Input Monitoring can be granted at any time (and is silently
-            // revoked when the app bundle is replaced), so poll until the
-            // gate opens. Accessibility is deliberately NOT required here:
-            // recording and transcription work without it, and a missing
-            // Accessibility grant surfaces as a clear error at paste time.
             let config = Arc::clone(&hotkey_config);
             let status_app = app.clone();
             let status_cell = Arc::clone(&watcher_status);
+            #[cfg(target_os = "macos")]
             std::thread::spawn(move || {
-                let mut announced = false;
-                loop {
-                    if inject::is_listen_event_trusted() {
-                        break;
-                    }
-                    if !announced {
-                        *status_cell.write().unwrap() = "waiting-permissions".to_string();
-                        emit_hotkey_status(&status_app, "waiting-permissions", None);
-                        announced = true;
-                    }
-                    std::thread::sleep(Duration::from_secs(2));
-                }
-                eprintln!("Input Monitoring granted — hotkey watcher starting");
-                let status_cell = Arc::clone(&status_cell);
+                // Native listen-only event tap: reports its own lifecycle
+                // (waiting-accessibility / waiting-input-monitoring / ready)
+                // instead of failing invisibly like the polling backend.
+                let cb: crate::hotkey_tap::TapCallback =
+                    Arc::new(move |state: &str, reason: Option<String>| {
+                        *status_cell.write().unwrap() = state.to_string();
+                        emit_hotkey_status(&status_app, state, reason);
+                    });
+                crate::hotkey_tap::run(config, hk_tx, cb);
+            });
+            #[cfg(not(target_os = "macos"))]
+            std::thread::spawn(move || {
+                use hotkey::{HotkeyWatcher, PushToTalkWatcher, WatcherStatus};
                 PushToTalkWatcher {
                     config,
                     poll_interval_ms: 20,
@@ -207,8 +200,9 @@ impl Pipeline {
                             emit_hotkey_status(&status_app, "ready", None);
                         }
                         WatcherStatus::Unavailable(reason) => {
-                            *status_cell.write().unwrap() = format!("unavailable:{reason}");
-                            emit_hotkey_status(&status_app, "unavailable", Some(reason));
+                            let s = format!("unavailable:{reason}");
+                            emit_hotkey_status(&status_app, &s, Some(reason));
+                            *status_cell.write().unwrap() = s;
                         }
                     })),
                 }

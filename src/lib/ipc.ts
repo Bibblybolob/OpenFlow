@@ -98,6 +98,11 @@ export const api = {
 
   inputMonitoringStatus: () => invoke<boolean>("input_monitoring_status"),
 
+  hotkeyLastSeen: () =>
+    invoke<{ name: string; down: boolean; agoMs: number }[]>(
+      "hotkey_last_seen",
+    ),
+
   openAccessibilitySettings: () =>
     invoke<void>("open_accessibility_settings"),
 

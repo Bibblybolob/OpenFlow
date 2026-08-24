@@ -715,6 +715,7 @@ export default function Settings({
         </h2>
         <div className="overflow-hidden rounded-xl border border-white/5">
           <WatcherRow status={watcherStatus} />
+          <KeySightRow />
           <PermRow label="Microphone" ok={true} hint="Granted on first use" />
           <PermRow
             label="Input Monitoring (global hotkey)"
@@ -870,30 +871,88 @@ function KeyRow({
   );
 }
 
+const KEY_SEEN_POLL_MS = 500;
+
+function KeySightRow() {
+  const [seen, setSeen] = useState<{ name: string; down: boolean; agoMs: number }[]>(
+    [],
+  );
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const events = await api.hotkeyLastSeen();
+        if (alive) setSeen(events);
+      } catch {
+        // backend may be starting up; keep last known
+      }
+    };
+    tick();
+    const id = setInterval(tick, KEY_SEEN_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+  const latest = seen[seen.length - 1];
+  const trail = seen
+    .slice(-5)
+    .map((e) => `${e.name} ${e.down ? "\u2193" : "\u2191"}`)
+    .join("   ");
+  return (
+    <div className="flex items-center justify-between bg-white/[0.03] px-4 py-3 not-last:border-b not-last:border-white/5">
+      <div>
+        <span className="text-sm text-neutral-300">Key diagnostics</span>
+        <p className="mt-0.5 font-mono text-xs text-neutral-500">
+          {latest
+            ? `${trail}   ·   latest ${(latest.agoMs / 1000).toFixed(1)}s ago`
+            : "press any key — what the backend sees appears here"}
+        </p>
+      </div>
+      <span
+        className={`text-xs ${
+          seen.length ? "text-emerald-400" : "text-neutral-600"
+        }`}
+      >
+        {seen.length ? "Seeing keys" : "Idle"}
+      </span>
+    </div>
+  );
+}
+
 function WatcherRow({ status }: { status: string }) {
   const [prefix, detail] = status.split(":", 2);
   const ok = prefix === "ready";
   const label =
     prefix === "ready"
-      ? "Hotkey watcher"
-      : prefix === "waiting-permissions"
-        ? "Hotkey watcher — waiting for Input Monitoring"
-        : "Hotkey watcher unavailable";
+      ? "Hotkey backend"
+      : prefix === "waiting-accessibility"
+        ? "Hotkey backend — needs Accessibility"
+        : prefix === "waiting-input-monitoring"
+          ? "Hotkey backend — needs Input Monitoring"
+          : prefix === "waiting-permissions"
+            ? "Hotkey backend — waiting for permissions"
+            : "Hotkey backend unavailable";
+  const openRelevant = () =>
+    (prefix === "waiting-accessibility"
+      ? api.openAccessibilitySettings()
+      : openInputMonitoringSettings()
+    ).catch(() => {});
   return (
     <div className="flex items-center justify-between bg-white/[0.03] px-4 py-3 not-last:border-b not-last:border-white/5">
       <div>
         <span className="text-sm text-neutral-300">{label}</span>
         {detail && <p className="text-xs text-neutral-600">{detail}</p>}
-        {prefix === "waiting-permissions" && (
+        {!ok && prefix !== "unavailable" && (
           <p className="text-xs text-neutral-600">
-            Without it no hotkey can fire in any app
+            Without it the hotkey cannot fire in any app
           </p>
         )}
       </div>
       <div className="flex items-center gap-2">
-        {prefix === "waiting-permissions" && (
+        {!ok && (
           <button
-            onClick={openInputMonitoringSettings}
+            onClick={openRelevant}
             className="rounded-md bg-indigo-500/20 px-2 py-1 text-xs text-indigo-300 transition hover:bg-indigo-500/30"
           >
             Open System Settings

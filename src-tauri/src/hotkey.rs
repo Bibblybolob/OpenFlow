@@ -1,9 +1,14 @@
+#[cfg(not(target_os = "macos"))]
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
+#[cfg(not(target_os = "macos"))]
 use std::thread;
+#[cfg(not(target_os = "macos"))]
 use std::time::{Duration, Instant};
 
-use device_query::{DeviceQuery, DeviceState, Keycode};
+use device_query::Keycode;
+#[cfg(not(target_os = "macos"))]
+use device_query::{DeviceQuery, DeviceState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
@@ -85,7 +90,9 @@ impl Default for HotkeyConfig {
 pub type SharedHotkeyConfig = Arc<RwLock<HotkeyConfig>>;
 
 /// Lifecycle of the keyboard backend, reported to the UI so a dead hotkey
-/// can never be silent again.
+/// can never be silent again. macOS uses the event-tap backend instead,
+/// which reports plain status strings.
+#[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone)]
 pub enum WatcherStatus {
     /// Keyboard backend opened; keystrokes are being watched.
@@ -95,8 +102,10 @@ pub enum WatcherStatus {
     Unavailable(String),
 }
 
+#[cfg(not(target_os = "macos"))]
 pub type StatusCallback = Arc<dyn Fn(WatcherStatus) + Send + Sync>;
 
+#[cfg(not(target_os = "macos"))]
 pub trait HotkeyWatcher: Send {
     fn spawn(self, tx: Sender<HotkeyEvent>) -> thread::JoinHandle<()>;
 }
@@ -110,6 +119,7 @@ pub trait HotkeyWatcher: Send {
 /// [`WatcherStatus::Unavailable`] and retries every few seconds instead of
 /// dying permanently — granting the permission back is enough to recover
 /// without a relaunch.
+#[cfg(not(target_os = "macos"))]
 #[derive(Clone)]
 pub struct PushToTalkWatcher {
     pub config: SharedHotkeyConfig,
@@ -117,15 +127,7 @@ pub struct PushToTalkWatcher {
     pub on_status: Option<StatusCallback>,
 }
 
-impl std::fmt::Debug for PushToTalkWatcher {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PushToTalkWatcher")
-            .field("poll_interval_ms", &self.poll_interval_ms)
-            .field("on_status", &self.on_status.is_some())
-            .finish()
-    }
-}
-
+#[cfg(not(target_os = "macos"))]
 impl Default for PushToTalkWatcher {
     fn default() -> Self {
         Self {
@@ -136,9 +138,11 @@ impl Default for PushToTalkWatcher {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 const WATCHER_RETRY_MS: u64 = 3000;
 
-impl HotkeyWatcher for PushToTalkWatcher {
+#[cfg(not(target_os = "macos"))]
+impl std::fmt::Debug for PushToTalkWatcher {
     fn spawn(self, tx: Sender<HotkeyEvent>) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let device = loop {

@@ -2,6 +2,8 @@ mod audio;
 mod cloud;
 mod commands;
 mod hotkey;
+#[cfg(target_os = "macos")]
+mod hotkey_tap;
 mod inject;
 mod learn;
 mod pipeline;
@@ -712,6 +714,21 @@ fn input_monitoring_status() -> bool {
     inject::is_listen_event_trusted()
 }
 
+/// Recent raw keystrokes seen by the hotkey backend, for the Settings
+/// diagnostics row ("press your hotkey and watch it appear").
+#[tauri::command]
+fn hotkey_last_seen() -> Vec<serde_json::Value> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::hotkey_tap::recent_events()
+            .into_iter()
+            .map(|e| serde_json::json!({ "name": e.name, "down": e.down, "agoMs": e.ago_ms }))
+            .collect()
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
 #[tauri::command]
 fn open_accessibility_settings(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -871,6 +888,7 @@ pub fn run() {
             install_update,
             accessibility_status,
             input_monitoring_status,
+            hotkey_last_seen,
             open_accessibility_settings,
             open_input_monitoring_settings,
             local_model_status,
