@@ -200,7 +200,9 @@ impl Pipeline {
                     let st = drain_state.load(Ordering::Relaxed);
                     let active = st == PipelineState::Recording.as_u8()
                         || st == PipelineState::Paused.as_u8();
-                    if !active {
+                    // Opt-in feature: by default chunks are never processed
+                    // and every session yields a single output at stop.
+                    if !active || !live_commit_enabled(&drain_db) {
                         continue;
                     }
                     let app = drain_app.clone();
@@ -513,7 +515,7 @@ fn handler_loop(
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                     continue;
                 }
-                if toggle && mode == Mode::Ptt && !busy.load(Ordering::Relaxed) {
+                if toggle && mode == Mode::Ptt {
                     // Toggle activation: second press ends the session,
                     // exactly like releasing in push-to-talk.
                     session_gen.fetch_add(1, Ordering::Relaxed);
@@ -1044,6 +1046,16 @@ fn mic_preference(db: &Store) -> Option<String> {
 /// Activation style: "toggle" (press to start, press again to stop — the
 /// default) or "push_to_talk" (hold the key, release to stop, double-tap
 /// for hands-free).
+/// Natural-speech flow is opt-in: with the default, a session always
+/// produces exactly one consolidated output at stop.
+fn live_commit_enabled(db: &Store) -> bool {
+    db.get_setting("liveCommit")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<bool>(&v).ok())
+        .unwrap_or(false)
+}
+
 fn hotkey_is_toggle(db: &Store) -> bool {
     db.get_setting("hotkeyMode")
         .ok()
@@ -1383,6 +1395,19 @@ fn db_prompt(db: &Store) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_commit_defaults_off_and_roundtrips() {
+        let store = crate::store::Store::open(std::path::Path::new(":memory:")).unwrap();
+        assert!(
+            !live_commit_enabled(&store),
+            "single output must be the default"
+        );
+        store
+            .set_setting("liveCommit", &serde_json::json!(true))
+            .unwrap();
+        assert!(live_commit_enabled(&store));
+    }
 
     #[test]
     fn artifact_matcher_catches_stock_phrases_only() {

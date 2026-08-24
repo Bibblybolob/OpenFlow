@@ -17,7 +17,7 @@ const MIN_VOICED_MS: u32 = 300;
 /// Natural-speech flow: while a session is capturing, this much trailing
 /// silence after voiced content finalizes the current sentence span and
 /// ships it upstream for immediate transcription+paste. Capture continues.
-pub const CHUNK_SILENCE_SECS: f32 = 0.8;
+pub const CHUNK_SILENCE_SECS: f32 = 1.5;
 /// A finalized span shorter than this is not worth its own round-trip.
 const MIN_CHUNK_MS: i64 = 500;
 /// Bounded so a stalled consumer can never block the cpal callback;

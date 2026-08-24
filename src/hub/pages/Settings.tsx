@@ -60,6 +60,7 @@ export default function Settings({
   const [noiseSuppression, setNoiseSuppression] = useState(true);
   const [voiceSensitivity, setVoiceSensitivity] = useState("medium");
   const [hotkeyMode, setHotkeyMode] = useState("toggle");
+  const [liveCommit, setLiveCommit] = useState(false);
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -127,6 +128,7 @@ export default function Settings({
     const ns = await api.getSetting<boolean>("noiseSuppression");
     const vs = await api.getSetting<string>("voiceSensitivity");
     const hmode = await api.getSetting<string>("hotkeyMode");
+    const lc = await api.getSetting<boolean>("liveCommit");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
@@ -154,6 +156,7 @@ export default function Settings({
     setNoiseSuppression(ns ?? true);
     setVoiceSensitivity(vs ?? "medium");
     setHotkeyMode(hmode ?? "toggle");
+    setLiveCommit(lc ?? false);
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
@@ -281,6 +284,12 @@ export default function Settings({
     const next = !noiseSuppression;
     setNoiseSuppression(next);
     await api.setSetting("noiseSuppression", next);
+  }
+
+  async function toggleLiveCommit() {
+    const next = !liveCommit;
+    setLiveCommit(next);
+    await api.setSetting("liveCommit", next);
   }
 
   async function changeHotkeyMode(v: string) {
@@ -422,6 +431,12 @@ export default function Settings({
             ...mics.map((m) => ({ value: m, label: m })),
           ]}
           onChange={changeMic}
+        />
+        <ToggleRow
+          label="Paste sentences while speaking"
+          hint="Commit each sentence as you pause instead of one block at the end"
+          checked={liveCommit}
+          onChange={toggleLiveCommit}
         />
         <ToggleRow
           label="Noise suppression"
