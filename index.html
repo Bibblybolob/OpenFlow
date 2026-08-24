@@ -4,7 +4,15 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri + React + Typescript</title>
+    <title>FlowClone</title>
+    <script>
+      // Overlay routes must be transparent from the very first paint; the
+      // stylesheet default (#0d0d10) would otherwise flash as an opaque
+      // rectangle until React mounts.
+      if (location.hash.indexOf("#/flowbar") === 0) {
+        document.documentElement.classList.add("overlay");
+      }
+    </script>
   </head>
 
   <body>

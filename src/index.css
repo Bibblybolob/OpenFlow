@@ -17,3 +17,11 @@ body,
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
+
+/* Transparent canvas for the always-on-top pill window (pre-JS safe).
+   The flowbar route tags <html> with .overlay before any bundle runs. */
+html.overlay,
+html.overlay body,
+html.overlay #root {
+  background-color: transparent;
+}
