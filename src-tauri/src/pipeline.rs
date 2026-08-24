@@ -472,18 +472,23 @@ fn handler_loop(
     // counter that invalidates stale hands-free auto-stop watchdogs.
     let last_voice_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let session_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let Metering {
+        mic_level,
+        mic_voiced,
+        chunk_tx,
+    } = metering;
     {
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let last_voice_ms = Arc::clone(&last_voice_ms);
-        let Metering {
-            mic_level,
-            mic_voiced,
-            chunk_tx,
-        } = metering;
         let level_cell = Arc::clone(&mic_level);
         let voiced_cell = Arc::clone(&mic_voiced);
-        audio.set_chunk_sender(chunk_tx);
+        // Chunking is opt-in (Settings → live commit). Attaching nothing
+        // keeps default sessions out of the chunk path entirely; sessions
+        // started later re-check so toggling needs no app restart.
+        if live_commit_enabled(&db) {
+            audio.set_chunk_sender(chunk_tx.clone());
+        }
         audio.set_level_callback(move |bar, voiced| {
             voiced_cell.store(voiced as u8, Ordering::Relaxed);
             // Latest display level + voice flag, polled by the pill webview
@@ -549,6 +554,9 @@ fn handler_loop(
                     current_app = inject::frontmost_app();
                     audio.set_device(mic_preference(&db));
                     audio.set_processing(noise_suppression_enabled(&db), vad_sensitivity_mult(&db));
+                    if live_commit_enabled(&db) {
+                        audio.set_chunk_sender(chunk_tx.clone());
+                    }
                     if let Err(e) = audio.start() {
                         // Never swallow this: a dead mic must look different
                         // from a dead hotkey, or users cannot tell them apart.
@@ -623,6 +631,9 @@ fn handler_loop(
                             noise_suppression_enabled(&db),
                             vad_sensitivity_mult(&db),
                         );
+                        if live_commit_enabled(&db) {
+                            audio.set_chunk_sender(chunk_tx.clone());
+                        }
                         crate::begin_context_capture();
                         if let Err(e) = audio.start() {
                             fail(&app, &db, &state, format!("microphone unavailable: {e}"));
@@ -758,6 +769,9 @@ fn handler_loop(
                     current_app = inject::frontmost_app();
                     audio.set_device(mic_preference(&db));
                     audio.set_processing(noise_suppression_enabled(&db), vad_sensitivity_mult(&db));
+                    if live_commit_enabled(&db) {
+                        audio.set_chunk_sender(chunk_tx.clone());
+                    }
                     crate::begin_context_capture();
                     if let Err(e) = audio.start() {
                         fail(&app, &db, &state, format!("microphone unavailable: {e}"));
