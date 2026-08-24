@@ -21,6 +21,10 @@ pub struct LocalModel {
     pub label: &'static str,
     /// Approximate download size in MB, for UI display.
     pub approx_mb: u64,
+    /// Exact ggml filename on the whisper.cpp Hugging Face mirror. Most
+    /// models ship quantized as q5_1, but large-v3-turbo only exists as
+    /// q5_0 / q8_0 upstream.
+    pub file_name: &'static str,
 }
 
 /// Multilingual quantized models from ggerganov/whisper.cpp. Multilingual
@@ -30,18 +34,31 @@ pub const LOCAL_MODELS: &[LocalModel] = &[
         id: "tiny",
         label: "Tiny — fastest, lower accuracy",
         approx_mb: 33,
+        file_name: "ggml-tiny-q5_1.bin",
     },
     LocalModel {
         id: "base",
         label: "Base — balanced (recommended)",
         approx_mb: 60,
+        file_name: "ggml-base-q5_1.bin",
     },
     LocalModel {
         id: "small",
-        label: "Small — best accuracy, slower",
+        label: "Small — middle ground, slower",
         approx_mb: 188,
+        file_name: "ggml-small-q5_1.bin",
+    },
+    LocalModel {
+        id: "large-v3-turbo",
+        label: "Large v3 Turbo — highest accuracy",
+        approx_mb: 574,
+        file_name: "ggml-large-v3-turbo-q5_0.bin",
     },
 ];
+
+fn catalog_model(model_id: &str) -> Option<&'static LocalModel> {
+    LOCAL_MODELS.iter().find(|m| m.id == model_id)
+}
 
 const MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 static MODELS_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -64,7 +81,11 @@ fn models_dir() -> PathBuf {
 }
 
 pub fn model_path(model_id: &str) -> PathBuf {
-    models_dir().join(format!("ggml-{model_id}-q5_1.bin"))
+    match catalog_model(model_id) {
+        Some(m) => models_dir().join(m.file_name),
+        // Unknown ids fall back to the legacy q5_1 naming.
+        None => models_dir().join(format!("ggml-{model_id}-q5_1.bin")),
+    }
 }
 
 pub fn resolve_model_id(db: &Store) -> String {
@@ -116,7 +137,10 @@ fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
         return Ok(dest);
     }
 
-    let url = format!("{MODEL_URL_BASE}/ggml-{model_id}-q5_1.bin?download=true");
+    let url = match catalog_model(model_id) {
+        Some(m) => format!("{MODEL_URL_BASE}/{}?download=true", m.file_name),
+        None => format!("{MODEL_URL_BASE}/ggml-{model_id}-q5_1.bin?download=true"),
+    };
     let mut resp = super::http_client()?
         .get(&url)
         .send()
@@ -274,4 +298,43 @@ fn decode_wav_mono(wav_bytes: &[u8]) -> Result<Vec<f32>> {
         .filter_map(|s| s.ok())
         .map(|s| s as f32 / i16::MAX as f32)
         .collect())
+}
+
+/// Manual hardware gate for a model: point FLOWCLONE_TURBO_TEST_WAV at a
+/// 16 kHz mono wav and run
+///   cargo test turbo_model_transcribes_real_speech -- --ignored --nocapture
+/// Skips silently when the env var is absent so normal `cargo test` stays hermetic.
+#[test]
+#[ignore = "manual: set FLOWCLONE_TURBO_TEST_WAV to a 16 kHz mono wav"]
+fn turbo_model_transcribes_real_speech() {
+    let Ok(wav_path) = std::env::var("FLOWCLONE_TURBO_TEST_WAV") else {
+        eprintln!("skipping: FLOWCLONE_TURBO_TEST_WAV not set");
+        return;
+    };
+    let home = std::env::var("HOME").expect("HOME set");
+    init_models_dir(
+        PathBuf::from(home).join("Library/Application Support/com.flowclone.app/models"),
+    );
+    assert!(
+        is_downloaded("large-v3-turbo"),
+        "turbo model missing on disk"
+    );
+
+    let db_path =
+        std::env::temp_dir().join(format!("flowclone-turbo-gate-{}.db", std::process::id()));
+    let db = Store::open(&db_path).expect("open scratch store");
+    let _ = std::fs::remove_file(&db_path);
+    // Point the resolver at turbo; resolve_model_id reads this setting.
+    db.set_setting("sttLocalModel", &serde_json::json!("large-v3-turbo"))
+        .expect("set model");
+
+    let wav = std::fs::read(&wav_path).expect("read test wav");
+    let started = std::time::Instant::now();
+    let result = transcribe_local(&db, &wav, "en", None).expect("turbo transcription");
+    eprintln!(
+        "turbo end-to-end in {:?}: {:?}",
+        started.elapsed(),
+        result.text
+    );
+    assert!(!result.text.trim().is_empty(), "expected some transcript");
 }
