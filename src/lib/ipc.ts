@@ -148,6 +148,9 @@ export const api = {
   setFlowbarVisible: (visible: boolean) =>
     invoke<void>("set_flowbar_visible", { visible }),
 
+  fitFlowbar: (width: number, height: number) =>
+    invoke<void>("flowbar_fit", { width, height }),
+
   setFlowbarPreset: (preset: string) =>
     invoke<void>("set_flowbar_preset", { preset }),
 

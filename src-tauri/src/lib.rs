@@ -565,6 +565,57 @@ fn set_flowbar_visible(app: tauri::AppHandle, visible: bool) -> Result<(), Strin
     }
 }
 
+/// Padding (logical px) the fit command adds around the reported content
+/// size — glow ring breathing room. Mirrors GLOW_PAD in FlowBar.tsx.
+const FLOWBAR_FIT_PAD: f64 = 18.0;
+
+/// Resizes the flowbar window to wrap its pill exactly: `width`/`height`
+/// are the measured logical content size; the window grows by FLOWBAR_FIT_PAD
+/// on every side and is repositioned so the pill's CENTER stays put. This
+/// keeps the OS window footprint equal to the visible capsule — no invisible
+/// slab to mis-click.
+#[tauri::command]
+fn flowbar_fit(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
+    use tauri::LogicalPosition;
+    let window = app
+        .get_webview_window("flowbar")
+        .ok_or_else(|| "flowbar window not found".to_string())?;
+    let sf = window.scale_factor().map_err(|e| e.to_string())?;
+    // Current inner rect in logical coordinates; the pill fills it with a
+    // GLOW_PAD inset, so its center is the window's center.
+    let cur_inner = window.inner_size().map_err(|e| e.to_string())?;
+    let cur_outer = window.outer_position().map_err(|e| e.to_string())?;
+    let cur_w = cur_inner.width as f64 / sf;
+    let cur_h = cur_inner.height as f64 / sf;
+    let cx = cur_outer.x as f64 / sf + cur_w / 2.0;
+    let cy = cur_outer.y as f64 / sf + cur_h / 2.0;
+
+    let w = width.clamp(120.0, 4096.0) + FLOWBAR_FIT_PAD * 2.0;
+    let h = height.clamp(44.0, 2048.0) + FLOWBAR_FIT_PAD * 2.0;
+    let mut x = cx - w / 2.0;
+    let mut y = cy - h / 2.0;
+
+    // Clamp into the current monitor so growth (long partials, open menu)
+    // can never push the pill off-screen.
+    if let Ok(Some(mon)) = window.current_monitor() {
+        let mpos = mon.position();
+        let msize = mon.size();
+        let mx = mpos.x as f64 / sf;
+        let my = mpos.y as f64 / sf;
+        let mw = msize.width as f64 / sf;
+        let mh = msize.height as f64 / sf;
+        x = x.clamp(mx, (mx + mw - w).max(mx));
+        y = y.clamp(my, (my + mh - h).max(my));
+    }
+
+    window
+        .set_size(tauri::LogicalSize::new(w, h))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn set_flowbar_preset(
     app: tauri::AppHandle,
@@ -897,6 +948,7 @@ pub fn run() {
             autostart_set,
             check_mic_permission,
             set_flowbar_visible,
+            flowbar_fit,
             set_flowbar_preset,
             check_for_update,
             install_update,

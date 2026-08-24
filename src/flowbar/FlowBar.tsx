@@ -29,6 +29,10 @@ const STATE_POLL_MS = 300;
 // "the pill is broken".
 const SILENCE_ALERT_MS = 2000;
 const SAMPLE_INTERVAL_MS = 40;
+// Breathing room the Rust side adds around our reported content size
+// (glow ring). Must mirror FLOWBAR_FIT_PAD in src-tauri/src/lib.rs.
+const GLOW_PAD = 18;
+const FIT_DEBOUNCE_MS = 80;
 
 const pillVariants = {
   hidden: { opacity: 0, scale: 0.85, y: 12 },
@@ -80,6 +84,78 @@ export default function FlowBar() {
   const wantVisibleRef = useRef(false);
   const lastVoiceAtRef = useRef(0);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Fit plumbing: the OS window shrinks/grows to wrap the pill, so the
+  // pill's measured box (plus the open style menu) drives window geometry.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const pillRef = useRef<HTMLDivElement | null>(null);
+  const fitTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  function measureFit(): { w: number; h: number } | null {
+    const root = stageRef.current;
+    if (!root) return null;
+    const pad = GLOW_PAD * 2;
+    let left = 0,
+      top = 0,
+      right = 0,
+      bottom = 0,
+      any = false;
+    for (const el of [
+      pillRef.current,
+      root.querySelector<HTMLElement>("[data-style-menu]"),
+    ]) {
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (!any) {
+        left = r.left;
+        top = r.top;
+        right = r.right;
+        bottom = r.bottom;
+        any = true;
+      } else {
+        left = Math.min(left, r.left);
+        top = Math.min(top, r.top);
+        right = Math.max(right, r.right);
+        bottom = Math.max(bottom, r.bottom);
+      }
+    }
+    if (!any) return null;
+    return {
+      w: Math.ceil(right - left + pad),
+      h: Math.ceil(bottom - top + pad),
+    };
+  }
+
+  function scheduleFit() {
+    clearTimeout(fitTimer.current);
+    fitTimer.current = setTimeout(() => {
+      const size = measureFit();
+      if (size) api.fitFlowbar(size.w, size.h).catch(() => {});
+    }, FIT_DEBOUNCE_MS);
+  }
+
+  // Re-fit whenever rendered content can change the pill's footprint.
+  useEffect(() => {
+    if (!syncedRef.current) return;
+    scheduleFit();
+    const pill = pillRef.current;
+    if (!pill || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(scheduleFit);
+    ro.observe(pill);
+    return () => {
+      ro.disconnect();
+      clearTimeout(fitTimer.current);
+    };
+  }, [
+    state,
+    partial,
+    hotkeyHint,
+    overrideLabel,
+    errorText,
+    micSilent,
+    styleMenuOpen,
+    style,
+    shown,
+  ]);
 
   useEffect(() => {
     document.documentElement.style.background = "transparent";
@@ -147,12 +223,16 @@ export default function FlowBar() {
       const visibleAtLaunch = !(loaded.autoHide && current === "idle");
       wantVisibleRef.current = visibleAtLaunch;
       if (visibleAtLaunch) {
+        // Fit before revealing so the window is already pill-sized.
+        const size = measureFit();
+        if (size) await api.fitFlowbar(size.w, size.h).catch(() => {});
         await api.setFlowbarVisible(true).catch(() => {});
         setShown(true);
       } else {
         setShown(false);
       }
       syncedRef.current = true;
+      scheduleFit();
       try {
         const hk = await api.getHotkey();
         if (hk.length) setHotkeyHint(hk.join("+"));
@@ -317,27 +397,39 @@ export default function FlowBar() {
 
   return (
     <div
-      data-tauri-drag-region
-      className="flex h-screen w-screen items-center justify-center"
+      ref={stageRef}
+      className="relative h-screen w-screen overflow-hidden"
     >
       <motion.div
+        ref={pillRef}
+        data-pill
         data-tauri-drag-region
         variants={pillVariants}
         initial="hidden"
         animate={shown ? "shown" : "hidden"}
         transition={spring}
-        onAnimationComplete={onHiddenAnimationDone}
+        onAnimationComplete={(def) => {
+          onHiddenAnimationDone(def);
+          // Entrance settles at scale 1 — re-fit once the transform is done
+          // so the window wraps the final geometry.
+          if (def === "shown") scheduleFit();
+        }}
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
         onContextMenu={openStyleMenu}
-        className={`relative flex items-center gap-2 ${radius} border px-3 py-1.5 shadow-2xl backdrop-blur-xl`}
+        className={`absolute flex items-center gap-2 ${radius} border px-3 py-1.5 shadow-2xl`}
         style={{
+          left: GLOW_PAD,
+          top: GLOW_PAD,
           background: pillBackground(mode, style.opacity),
           borderColor,
         }}
       >
         {styleMenuOpen && (
-          <div className="absolute bottom-full left-1/2 z-10 mb-2 w-48 -translate-x-1/2 rounded-xl border border-white/10 bg-[#17171c]/95 p-1 shadow-2xl backdrop-blur-xl">
+          <div
+            data-style-menu
+            className="absolute bottom-full left-1/2 z-10 mb-2 w-48 -translate-x-1/2 rounded-xl border border-white/10 bg-[#17171c]/95 p-1 shadow-2xl"
+          >
             {(
               [
                 [null, "Auto (match app)"],
