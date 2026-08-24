@@ -484,27 +484,33 @@ fn maybe_emit_chunk(s: &mut Shared, chunk_tx: &Option<std::sync::mpsc::SyncSende
         return;
     }
     let end = s.last_voiced_end.min(s.samples.len());
-    let dur_ms = (end.saturating_sub(0) as f64 / f64::from(s.sample_rate) * 1000.0) as i64;
+    let dur_ms = (end as f64 / f64::from(s.sample_rate) * 1000.0) as i64;
+    let mut delivered = false;
     if let Some(tx) = chunk_tx {
         if end > 0 && dur_ms >= MIN_CHUNK_MS && end <= s.samples.len() {
-            let samples = s.samples[..end].to_vec();
-            // try_send: never block the realtime callback; overflow drops.
-            match tx.try_send(SentenceChunk {
-                samples,
-                sample_rate: s.sample_rate,
-            }) {
-                Ok(()) => eprintln!("chunk: shipped {}ms of speech", dur_ms),
-                Err(e) => eprintln!("chunk: dropped ({e}) — session flush will catch it"),
-            }
+            // try_send: never block the realtime callback; overflow keeps
+            // the audio buffered so the session-end flush still catches it.
+            delivered = tx
+                .try_send(SentenceChunk {
+                    samples: s.samples[..end].to_vec(),
+                    sample_rate: s.sample_rate,
+                })
+                .is_ok();
         }
     }
-    // Consumed audio (spoken span + trailing gap) leaves the buffer
-    // entirely — long sessions stay small and the session-end flush sees
-    // only the unfinished tail.
-    s.samples.clear();
-    s.last_voiced_end = 0;
+    if delivered {
+        // Consumed audio (spoken span + trailing gap) leaves the buffer
+        // entirely — long live-commit sessions stay small and the
+        // session-end flush sees only the unfinished tail.
+        let consumed = end.min(s.samples.len());
+        s.samples.drain(..consumed);
+        s.has_voice_in_chunk = false;
+        s.last_voiced_end = 0;
+    }
+    // Close out this silence run either way so the same finalized span is
+    // not re-evaluated every frame. With no consumer attached (or a failed
+    // send) the samples stay put for the single session-end output.
     s.silence_samples_run = 0;
-    s.has_voice_in_chunk = false;
 }
 
 /// Adaptive voice-isolation gate. Tracks the recording's own noise floor
@@ -888,7 +894,13 @@ mod tests {
         let chunk = rx.try_recv().expect("chunk shipped");
         assert_eq!(chunk.samples.len(), rate as usize * 3 / 4);
         assert_eq!(chunk.sample_rate, rate);
-        assert!(s.samples.is_empty(), "consumed audio must leave the buffer");
+        // Only the delivered span leaves the buffer; the trailing silence
+        // stays behind for the session-end flush.
+        assert_eq!(
+            s.samples.len(),
+            rate as usize - rate as usize * 3 / 4,
+            "consumed audio must leave the buffer"
+        );
         assert!(!s.has_voice_in_chunk);
         assert_eq!(s.silence_samples_run, 0);
         assert_eq!(s.last_voiced_end, 0);
@@ -910,6 +922,47 @@ mod tests {
         maybe_emit_chunk(&mut s, &Some(tx));
         assert!(rx.try_recv().is_err(), "below threshold must not emit");
         assert_eq!(s.samples.len(), 1000, "buffer untouched");
+    }
+
+    #[test]
+    fn no_consumer_keeps_audio_for_session_flush() {
+        // Default mode (live commit off): nothing may leave the buffer —
+        // the session-end flush owns all of it.
+        let rate = 48_000u32;
+        let mut s = Shared {
+            samples: vec![0.1f32; rate as usize],
+            sample_rate: rate,
+            has_voice_in_chunk: true,
+            silence_samples_run: (rate as f32 * CHUNK_SILENCE_SECS) as usize,
+            last_voiced_end: rate as usize * 3 / 4,
+            floor: 0.01,
+            env: 0.0,
+        };
+        maybe_emit_chunk(&mut s, &None);
+        assert!(
+            !s.samples.is_empty(),
+            "default mode must retain audio for the single session-end output"
+        );
+        assert!(s.has_voice_in_chunk, "voice state survives for the flush");
+    }
+
+    #[test]
+    fn failed_send_keeps_audio_for_session_flush() {
+        // A stalled/dropped consumer must not cost audio either.
+        let rate = 48_000u32;
+        let mut s = Shared {
+            samples: vec![0.1f32; rate as usize],
+            sample_rate: rate,
+            has_voice_in_chunk: true,
+            silence_samples_run: (rate as f32 * CHUNK_SILENCE_SECS) as usize,
+            last_voiced_end: rate as usize * 3 / 4,
+            floor: 0.01,
+            env: 0.0,
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel::<SentenceChunk>(1);
+        drop(rx); // try_send errs -> audio must survive for the flush
+        maybe_emit_chunk(&mut s, &Some(tx));
+        assert!(!s.samples.is_empty(), "failed send must retain audio");
     }
 
     #[test]
