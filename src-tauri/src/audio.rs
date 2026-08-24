@@ -758,11 +758,19 @@ mod tests {
 
     #[test]
     fn bar_scale_maps_speech_near_full() {
-        assert!((0.18f32 / BAR_FULL_SCALE).min(1.0) >= 1.0);
+        let speech = 0.18f32;
+        let quiet_syllable = speech / 2.0;
+        let bar_full = (speech / BAR_FULL_SCALE).min(1.0);
+        let bar_quiet = (quiet_syllable / BAR_FULL_SCALE).min(1.0);
         assert!(
-            0.09 / BAR_FULL_SCALE > 0.45,
-            "half-speech should be visible"
+            (bar_full - 1.0).abs() < 1e-6,
+            "reference-level speech should saturate"
         );
+        assert!(
+            bar_quiet > 0.45,
+            "half-volume syllables should stay clearly visible"
+        );
+        assert!(bar_quiet < 1.0, "headroom below saturation should exist");
     }
 
     #[test]
