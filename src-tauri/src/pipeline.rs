@@ -13,7 +13,14 @@ use crate::inject;
 use crate::store::{Store, Transcript};
 
 const MAX_SESSION_SECS: u64 = 360;
-const DOUBLE_TAP_WINDOW_MS: u64 = 700;
+/// Two taps within this window (each under the tap threshold) enter
+/// hands-free. Tight on purpose: accidental shift-taps while typing must
+/// not open the mic.
+const DOUBLE_TAP_WINDOW_MS: u64 = 350;
+/// After a quick release, wait this long for a possible second tap before
+/// judging the session finished. Keeps double-tap detection possible
+/// without ever leaving the mic open indefinitely.
+const TAP_JUDGE_WAIT_MS: u64 = 380;
 /// Hands-free sessions end themselves after this much silence, so walking
 /// away from the mic doesn't leave a giant accidental transcript behind.
 /// Natural-speech endpointing: stop soon after the voice trails off —
@@ -155,6 +162,10 @@ enum Msg {
     /// Sent by the worker thread once post-processing (STT/LLM/inject)
     /// completes, so the hotkey handler can accept new dictations again.
     SessionDone,
+    /// Sent TAP_JUDGE_WAIT_MS after a quick release that kept the session
+    /// alive for double-tap detection; if no second tap arrived by then,
+    /// the session ends like a normal release would.
+    TapJudge,
 }
 
 pub struct Pipeline {
@@ -521,6 +532,10 @@ fn handler_loop(
                 }
                 // Down while Ptt (second press of entering double-tap) or
                 // HandsFree (exit press): keep recording; release decides.
+                if pending_tap {
+                    pending_tap = false;
+                    first_tap_at = None;
+                }
             }
             Msg::Hotkey(HotkeyEvent::Up) => {
                 if mode != Mode::Idle {
@@ -550,9 +565,11 @@ fn handler_loop(
                             .map(|t| t.elapsed() < Duration::from_millis(DOUBLE_TAP_WINDOW_MS))
                             .unwrap_or(false);
                     if !pending_tap {
-                        // First quick tap: hold judgement, keep recording.
+                        // First quick tap: hold judgement briefly in case a
+                        // second tap follows, then finish automatically.
                         pending_tap = true;
                         first_tap_at = Some(Instant::now());
+                        spawn_tap_judge(&timer_tx);
                     } else if confirmed_double {
                         // Double-tap confirmed: restart capture cleanly and
                         // go hands-free.
@@ -571,6 +588,10 @@ fn handler_loop(
                             mode = Mode::HandsFree;
                             pending_tap = false;
                             last_voice_ms.store(unix_ms(), Ordering::Relaxed);
+                            if crate::sound::enabled(&db) {
+                                crate::sound::play(crate::sound::Chime::Start);
+                            }
+                            emit_warning(&app, "hands-free: speak freely — Esc stops".to_string());
                             let gen = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
                             spawn_handsfree_watchdog(
                                 &timer_tx,
@@ -581,18 +602,21 @@ fn handler_loop(
                             spawn_max_session_timer(&timer_tx);
                         }
                     } else {
-                        // Slow second tap — treat as hands-free entry too
-                        // but without resetting the buffer.
-                        mode = Mode::HandsFree;
-                        pending_tap = false;
-                        last_voice_ms.store(unix_ms(), Ordering::Relaxed);
-                        let gen = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                        spawn_handsfree_watchdog(
+                        // Second tap came too late for double-tap — judge
+                        // this as an ordinary quick release and stop.
+                        session_gen.fetch_add(1, Ordering::Relaxed);
+                        finish_session(
+                            &app,
+                            &db,
+                            &state,
+                            &mut audio,
+                            &mut current_app,
+                            &busy,
                             &timer_tx,
-                            Arc::clone(&last_voice_ms),
-                            Arc::clone(&session_gen),
-                            gen,
                         );
+                        mode = Mode::Idle;
+                        pending_tap = false;
+                        first_tap_at = None;
                     }
                 }
                 Mode::HandsFree => {
@@ -664,6 +688,24 @@ fn handler_loop(
                 pending_start = false;
                 transition(&app, &db, &state, PipelineState::Idle, None, None);
             }
+            Msg::TapJudge => {
+                if pending_tap && mode == Mode::Ptt {
+                    // No second tap arrived: treat as a normal release.
+                    pending_tap = false;
+                    first_tap_at = None;
+                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    finish_session(
+                        &app,
+                        &db,
+                        &state,
+                        &mut audio,
+                        &mut current_app,
+                        &busy,
+                        &timer_tx,
+                    );
+                    mode = Mode::Idle;
+                }
+            }
             Msg::SessionDone => {
                 busy.store(false, Ordering::Relaxed);
                 if pending_start && mode == Mode::Idle {
@@ -706,6 +748,14 @@ fn spawn_handsfree_watchdog(
             let _ = tx.send(Msg::Hotkey(HotkeyEvent::Up));
             return;
         }
+    });
+}
+
+fn spawn_tap_judge(tx: &mpsc::Sender<Msg>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(TAP_JUDGE_WAIT_MS));
+        let _ = tx.send(Msg::TapJudge);
     });
 }
 

@@ -21,7 +21,7 @@ interface PipelineEvent {
   error?: string;
 }
 
-const WAVE_BARS = 20;
+const WAVE_BARS = 4;
 const HIDE_DELAY_MS = 450;
 const STATE_POLL_MS = 300;
 // When no audible input reaches the capture stream for this long while
@@ -451,9 +451,9 @@ export default function FlowBar() {
               return (
                 <span
                   key={i}
-                  className="w-[3px] shrink-0 rounded-full"
+                  className="w-[5px] shrink-0 rounded-full"
                   style={{
-                    height: `${Math.max(9, boosted * 100)}%`,
+                    height: `${Math.max(14, boosted * 100)}%`,
                     backgroundColor: accent.soft,
                     opacity: 0.45 + boosted * 0.55,
                     transition: "height 70ms linear",

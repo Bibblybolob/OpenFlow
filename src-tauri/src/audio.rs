@@ -17,7 +17,7 @@ const MIN_VOICED_MS: u32 = 300;
 /// Natural-speech flow: while a session is capturing, this much trailing
 /// silence after voiced content finalizes the current sentence span and
 /// ships it upstream for immediate transcription+paste. Capture continues.
-pub const CHUNK_SILENCE_SECS: f32 = 1.0;
+pub const CHUNK_SILENCE_SECS: f32 = 1.2;
 /// A finalized span shorter than this is not worth its own round-trip.
 const MIN_CHUNK_MS: i64 = 500;
 /// Bounded so a stalled consumer can never block the cpal callback;
@@ -60,13 +60,13 @@ struct Shared {
 /// Raw RMS that maps to a full-scale bar. Chosen so conversational speech
 /// at default mic gain fills the waveform; quiet rooms don't shrink it and
 /// loud ones don't clip it into uselessness below shouting.
-const BAR_FULL_SCALE: f32 = 0.18;
+const BAR_FULL_SCALE: f32 = 0.12;
 /// Envelope decay per callback (~30/s): peaks hold, then fall in ~200ms.
 const ENV_DECAY: f32 = 0.86;
 /// Below this absolute RMS nothing counts as voice, whatever the floor.
-const VOICED_ABS_MIN: f32 = 0.008;
+const VOICED_ABS_MIN: f32 = 0.006;
 /// Voice must clear the tracked floor by this multiple.
-const VOICED_FLOOR_MULT: f32 = 2.5;
+const VOICED_FLOOR_MULT: f32 = 2.0;
 /// Floor growth per callback: ~0.0001/s — minutes to drift up, so long
 /// takes never sag. Hard cap keeps noisy rooms from eating the gate.
 const FLOOR_RISE: f32 = 0.000004;
