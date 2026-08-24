@@ -17,7 +17,7 @@ const MIN_VOICED_MS: u32 = 300;
 /// Natural-speech flow: while a session is capturing, this much trailing
 /// silence after voiced content finalizes the current sentence span and
 /// ships it upstream for immediate transcription+paste. Capture continues.
-pub const CHUNK_SILENCE_SECS: f32 = 1.2;
+pub const CHUNK_SILENCE_SECS: f32 = 0.8;
 /// A finalized span shorter than this is not worth its own round-trip.
 const MIN_CHUNK_MS: i64 = 500;
 /// Bounded so a stalled consumer can never block the cpal callback;
@@ -443,10 +443,13 @@ fn maybe_emit_chunk(s: &mut Shared, chunk_tx: &Option<std::sync::mpsc::SyncSende
         if end > 0 && dur_ms >= MIN_CHUNK_MS && end <= s.samples.len() {
             let samples = s.samples[..end].to_vec();
             // try_send: never block the realtime callback; overflow drops.
-            let _ = tx.try_send(SentenceChunk {
+            match tx.try_send(SentenceChunk {
                 samples,
                 sample_rate: s.sample_rate,
-            });
+            }) {
+                Ok(()) => eprintln!("chunk: shipped {}ms of speech", dur_ms),
+                Err(e) => eprintln!("chunk: dropped ({e}) — session flush will catch it"),
+            }
         }
     }
     // Consumed audio (spoken span + trailing gap) leaves the buffer

@@ -1,6 +1,7 @@
 mod audio;
 mod cloud;
 mod commands;
+mod emoji;
 mod hotkey;
 #[cfg(target_os = "macos")]
 mod hotkey_tap;

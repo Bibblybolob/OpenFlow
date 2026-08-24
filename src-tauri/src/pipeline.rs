@@ -207,6 +207,11 @@ impl Pipeline {
                     let db = Arc::clone(&drain_db);
                     let state = Arc::clone(&drain_state);
                     std::thread::spawn(move || {
+                        eprintln!(
+                            "chunk: processing {} samples @{}",
+                            chunk.samples.len(),
+                            chunk.sample_rate
+                        );
                         process_sentence_chunk(app, db, state, chunk);
                     });
                 }
@@ -929,6 +934,7 @@ pub(crate) fn run_session(
         return;
     }
     crate::clear_retry_job();
+    let raw_text = crate::emoji::apply(&raw_text);
 
     let data = SessionData::new(recording.duration_ms, target_app, language);
 
@@ -1134,6 +1140,7 @@ fn process_sentence_chunk(
     };
     let regions = crate::audio::voice_regions(&work, work_rate, mult);
     if regions.voiced_ms < 300 || regions.segments.is_empty() {
+        eprintln!("chunk: skipped ({}ms voiced)", regions.voiced_ms);
         return; // nothing usable in this span
     }
     let cropped: Vec<f32> = regions
@@ -1238,6 +1245,10 @@ fn run_chunk_session(
     // Hallucination guard mirrors the session path.
     if recording.max_frame_rms < ARTIFACT_RAW_RMS && is_whisper_artifact(&raw_text) {
         eprintln!("chunk: dropped phantom text {raw_text:?}");
+        return;
+    }
+    let raw_text = crate::emoji::apply(&raw_text);
+    if raw_text.trim().is_empty() {
         return;
     }
 
