@@ -21,7 +21,7 @@ interface PipelineEvent {
   error?: string;
 }
 
-const WAVE_BARS = 26;
+const WAVE_BARS = 20;
 const HIDE_DELAY_MS = 450;
 const STATE_POLL_MS = 300;
 // When no audible input reaches the capture stream for this long while
@@ -35,7 +35,19 @@ const pillVariants = {
   shown: { opacity: 1, scale: 1, y: 0 },
 };
 
+function useKillScrollbars() {
+  useEffect(() => {
+    const css = document.createElement("style");
+    css.textContent =
+      "html,body{overflow:hidden!important}" +
+      "::-webkit-scrollbar{width:0;height:0;display:none}";
+    document.head.appendChild(css);
+    return () => css.remove();
+  }, []);
+}
+
 export default function FlowBar() {
+  useKillScrollbars();
   const [state, setState] = useState<State>("idle");
   const [hasError, setHasError] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
@@ -315,7 +327,7 @@ export default function FlowBar() {
         onMouseEnter={() => setHovering(true)}
         onMouseLeave={() => setHovering(false)}
         onContextMenu={openStyleMenu}
-        className={`relative flex items-center gap-3 ${radius} border px-4 py-2 shadow-2xl backdrop-blur-xl`}
+        className={`relative flex items-center gap-2 ${radius} border px-3 py-1.5 shadow-2xl backdrop-blur-xl`}
         style={{
           background: pillBackground(mode, style.opacity),
           borderColor,
@@ -385,7 +397,7 @@ export default function FlowBar() {
           }
           whileTap={style.animations ? { scale: 0.88 } : undefined}
           whileHover={style.animations ? { scale: 1.06 } : undefined}
-          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${
+          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
             recording && !paused ? "bg-red-500/90 text-white" : "text-white"
           }`}
           style={
@@ -414,7 +426,7 @@ export default function FlowBar() {
           <button
             onClick={onPauseClick}
             title={paused ? "Resume" : "Pause"}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-white/10 hover:text-white"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-neutral-400 transition hover:bg-white/10 hover:text-white"
           >
             {paused ? (
               <svg viewBox="0 0 24 24" fill="currentColor" className="ml-0.5 h-3.5 w-3.5">
@@ -429,11 +441,11 @@ export default function FlowBar() {
         )}
 
         {paused ? (
-          <div className="flex h-8 flex-1 items-center justify-center">
+          <div className="flex h-6 flex-1 items-center justify-center">
             <span className="text-xs text-neutral-400">Paused</span>
           </div>
         ) : recording ? (
-          <div className="flex h-8 flex-1 items-center justify-center gap-[3px]">
+          <div className="relative flex h-6 flex-1 items-center justify-center gap-[3px]">
             {wave.map((v, i) => {
               const boosted = Math.min(1, v * 1.35);
               return (
@@ -457,11 +469,11 @@ export default function FlowBar() {
           </div>
         ) : busy ? (
           partial ? (
-            <p className="line-clamp-2 max-h-8 flex-1 self-center overflow-hidden text-left text-[11px] leading-[1.15rem] text-neutral-200">
+            <p className="line-clamp-2 max-h-7 flex-1 self-center overflow-hidden text-left text-[11px] leading-[1.05rem] text-neutral-200">
               {partial}
             </p>
           ) : (
-            <div className="flex h-8 flex-1 items-center justify-center gap-1.5">
+            <div className="flex h-6 flex-1 items-center justify-center gap-1.5">
               {[0, 1, 2].map((i) => (
                 <span
                   key={i}

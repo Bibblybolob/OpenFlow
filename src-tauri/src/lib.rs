@@ -37,7 +37,7 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
     f(&state.db)
 }
 
-pub(crate) const FLOWBAR_SIZE: (f64, f64) = (300.0, 72.0);
+pub(crate) const FLOWBAR_SIZE: (f64, f64) = (240.0, 52.0);
 
 /// Text most recently injected into an app, kept so "scratch that" can undo
 /// it and so re-pasted history entries are equally undoable.
