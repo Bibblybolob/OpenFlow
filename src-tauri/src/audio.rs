@@ -29,10 +29,38 @@ pub enum AudioError {
 struct Shared {
     samples: Vec<f32>,
     sample_rate: u32,
-    /// Slow-tracking estimate of ambient noise (raw RMS). Rises barely,
-    /// falls quickly, and gates the level fed to the UI so bars show
-    /// speech rather than room tone.
+    /// Slow-tracking estimate of ambient noise (raw RMS). Falls quickly,
+    /// rises barely and is capped — used only for the voiced decision.
     floor: f32,
+    /// Peak-decay envelope of raw RMS feeding the bar display.
+    env: f32,
+}
+
+/// Raw RMS that maps to a full-scale bar. Chosen so conversational speech
+/// at default mic gain fills the waveform; quiet rooms don't shrink it and
+/// loud ones don't clip it into uselessness below shouting.
+const BAR_FULL_SCALE: f32 = 0.18;
+/// Envelope decay per callback (~30/s): peaks hold, then fall in ~200ms.
+const ENV_DECAY: f32 = 0.86;
+/// Below this absolute RMS nothing counts as voice, whatever the floor.
+const VOICED_ABS_MIN: f32 = 0.008;
+/// Voice must clear the tracked floor by this multiple.
+const VOICED_FLOOR_MULT: f32 = 2.5;
+/// Floor growth per callback: ~0.0001/s — minutes to drift up, so long
+/// takes never sag. Hard cap keeps noisy rooms from eating the gate.
+const FLOOR_RISE: f32 = 0.000004;
+const FLOOR_CAP: f32 = 0.03;
+
+fn next_floor(floor: f32, rms: f32) -> f32 {
+    if rms < floor {
+        floor * 0.95 + rms * 0.05
+    } else {
+        (floor + FLOOR_RISE).min(FLOOR_CAP)
+    }
+}
+
+fn is_voiced(floor: f32, rms: f32) -> bool {
+    rms > VOICED_ABS_MIN && rms > floor * VOICED_FLOOR_MULT
 }
 
 /// A finished dictation capture, ready for upload.
@@ -66,7 +94,7 @@ pub struct AudioEngine {
     shared: Arc<Mutex<Shared>>,
     stream: Option<cpal::Stream>,
     started_at: Option<Instant>,
-    on_level: Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    on_level: Option<Arc<dyn Fn(f32, bool) + Send + Sync>>,
     device_pref: Option<String>,
     noise_suppression: bool,
     vad_mult: f32,
@@ -93,6 +121,7 @@ impl AudioEngine {
                 samples: Vec::new(),
                 sample_rate: 48_000,
                 floor: 0.01,
+                env: 0.0,
             })),
             stream: None,
             started_at: None,
@@ -116,9 +145,12 @@ impl AudioEngine {
         self.device_pref = name.filter(|n| !n.trim().is_empty());
     }
 
-    /// Registers a callback receiving input loudness (0.0..1.0) roughly
-    /// 30x per second while recording. Persists across sessions.
-    pub fn set_level_callback(&mut self, cb: impl Fn(f32) + Send + Sync + 'static) {
+    /// Registers a callback receiving (bar, voiced) roughly 30x per second
+    /// while recording. `bar` is a peak-decay envelope of the raw RMS
+    /// normalized to a fixed speech reference — lively regardless of room
+    /// noise. `voiced` mirrors the offline gate's floor-relative decision
+    /// and drives silence detection. Persists across sessions.
+    pub fn set_level_callback(&mut self, cb: impl Fn(f32, bool) + Send + Sync + 'static) {
         self.on_level = Some(Arc::new(cb));
     }
 
@@ -331,7 +363,7 @@ impl AudioEngine {
 
 fn push_levelled(
     shared: &Arc<Mutex<Shared>>,
-    level_cb: &Option<Arc<dyn Fn(f32) + Send + Sync>>,
+    level_cb: &Option<Arc<dyn Fn(f32, bool) + Send + Sync>>,
     iter: impl Iterator<Item = f32>,
     frame_count: usize,
 ) {
@@ -341,15 +373,9 @@ fn push_levelled(
         let start = s.samples.len().saturating_sub(frame_count);
         let recent = &s.samples[start..];
         let rms = (recent.iter().map(|x| x * x).sum::<f32>() / recent.len().max(1) as f32).sqrt();
-        // Noise-floor tracking: drops fast toward quiet levels, creeps up
-        // almost imperceptibly, so sustained speech never raises the bar.
-        if rms < s.floor {
-            s.floor = s.floor * 0.95 + rms * 0.05;
-        } else {
-            s.floor += 0.00003;
-        }
-        let voiced = (rms - s.floor).max(0.0);
-        cb((voiced * 4.0).clamp(0.0, 1.0));
+        s.env = rms.max(s.env * ENV_DECAY);
+        s.floor = next_floor(s.floor, rms);
+        cb((s.env / BAR_FULL_SCALE).min(1.0), is_voiced(s.floor, rms));
     }
 }
 
@@ -715,6 +741,48 @@ mod tests {
             out.len()
         );
         assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn envelope_holds_peaks_and_decays() {
+        let mut env = 0.0f32;
+        for _ in 0..5 {
+            env = 0.3f32.max(env * ENV_DECAY);
+        }
+        assert!((env - 0.3).abs() < 1e-6);
+        for _ in 0..40 {
+            env = 0.0f32.max(env * ENV_DECAY);
+        }
+        assert!(env < 0.3 * 0.86f32.powi(30), "decayed too slowly: {env}");
+    }
+
+    #[test]
+    fn bar_scale_maps_speech_near_full() {
+        assert!((0.18f32 / BAR_FULL_SCALE).min(1.0) >= 1.0);
+        assert!(
+            0.09 / BAR_FULL_SCALE > 0.45,
+            "half-speech should be visible"
+        );
+    }
+
+    #[test]
+    fn voiced_needs_floor_clearance_or_absolute_minimum() {
+        assert!(!is_voiced(0.02, 0.005), "below absolute min");
+        assert!(!is_voiced(0.02, 0.04), "inside the floor margin");
+        assert!(is_voiced(0.02, 0.06));
+        // Capped floor keeps very noisy rooms honest.
+        assert!(!is_voiced(FLOOR_CAP, FLOOR_CAP * VOICED_FLOOR_MULT * 0.9));
+        assert!(is_voiced(FLOOR_CAP, FLOOR_CAP * VOICED_FLOOR_MULT * 1.2));
+    }
+
+    #[test]
+    fn floor_drift_is_negligible_during_speech() {
+        let mut floor = 0.01f32;
+        for _ in 0..1800 {
+            floor = next_floor(floor, 0.2); // one minute of continuous speech
+        }
+        assert!(floor < 0.02, "floor crept too high during speech: {floor}");
+        assert!(floor <= FLOOR_CAP);
     }
 
     #[test]

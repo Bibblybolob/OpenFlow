@@ -30,6 +30,7 @@ pub struct AppState {
     hotkey: SharedHotkeyConfig,
     watcher_status: Arc<RwLock<String>>,
     mic_level: Arc<AtomicU32>,
+    mic_voiced: Arc<std::sync::atomic::AtomicU8>,
 }
 
 fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
@@ -354,9 +355,18 @@ fn pipeline_status(state: tauri::State<AppState>) -> pipeline::PipelineState {
 /// Latest microphone RMS (0.0..1.0), pulled by the pill webview on a timer
 /// instead of pushed via events — WebKit throttles event/rAF delivery in
 /// hidden overlay windows, but invoke+setInterval keep working.
+#[derive(serde::Serialize)]
+struct MicLevel {
+    bar: f32,
+    voiced: bool,
+}
+
 #[tauri::command]
-fn mic_level(state: tauri::State<AppState>) -> f32 {
-    f32::from_bits(state.mic_level.load(AtomicOrdering::Relaxed))
+fn mic_level(state: tauri::State<AppState>) -> MicLevel {
+    MicLevel {
+        bar: f32::from_bits(state.mic_level.load(AtomicOrdering::Relaxed)),
+        voiced: state.mic_voiced.load(AtomicOrdering::Relaxed) != 0,
+    }
 }
 
 #[tauri::command]
@@ -769,12 +779,14 @@ pub fn run() {
             create_flowbar(app.handle(), &db)?;
             let watcher_status = Arc::new(RwLock::new("waiting-permissions".to_string()));
             let mic_level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
+            let mic_voiced = Arc::new(std::sync::atomic::AtomicU8::new(0));
             let pipeline = Pipeline::start(
                 app.handle().clone(),
                 Arc::clone(&db),
                 Arc::clone(&hotkey),
                 Arc::clone(&watcher_status),
                 Arc::clone(&mic_level),
+                Arc::clone(&mic_voiced),
             );
             app.manage(AppState {
                 db,
@@ -782,6 +794,7 @@ pub fn run() {
                 hotkey,
                 watcher_status,
                 mic_level,
+                mic_voiced,
             });
             // Pay the DNS+TCP+TLS handshake for the transcription API now,
             // in the background, so the first dictation doesn't. The pooled

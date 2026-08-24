@@ -28,7 +28,6 @@ const STATE_POLL_MS = 300;
 // recording, tell the user — a flat waveform otherwise looks identical to
 // "the pill is broken".
 const SILENCE_ALERT_MS = 2000;
-const SILENCE_LEVEL_THRESHOLD = 0.05;
 const SAMPLE_INTERVAL_MS = 40;
 
 const pillVariants = {
@@ -182,12 +181,16 @@ export default function FlowBar() {
     }
     let lastSilent: boolean | null = null;
     const sample = async () => {
-      const level = await api.micLevel().catch(() => 0);
-      if (level >= SILENCE_LEVEL_THRESHOLD) {
+      // Rust computes both a fixed-reference display envelope and the
+      // floor-relative voice decision; the pill just renders them.
+      const { bar, voiced } = await api
+        .micLevel()
+        .catch(() => ({ bar: 0, voiced: false }));
+      if (voiced) {
         lastVoiceAtRef.current = Date.now();
       }
       const next = waveRef.current.slice(1);
-      next.push(level);
+      next.push(bar);
       waveRef.current = next;
       setWave(next);
       const silent = Date.now() - lastVoiceAtRef.current > SILENCE_ALERT_MS;

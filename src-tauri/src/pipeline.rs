@@ -17,7 +17,6 @@ const DOUBLE_TAP_WINDOW_MS: u64 = 700;
 /// Hands-free sessions end themselves after this much silence, so walking
 /// away from the mic doesn't leave a giant accidental transcript behind.
 const HANDS_FREE_SILENCE_STOP_MS: u64 = 5000;
-const VOICE_LEVEL_THRESHOLD: f32 = 0.03;
 /// Raw-RMS ceiling under which a transcript is suspect: below this the mic
 /// captured essentially silence/room tone, so whisper-style models tend to
 /// confabulate stock phrases rather than transcribe speech.
@@ -167,6 +166,7 @@ impl Pipeline {
         hotkey_config: SharedHotkeyConfig,
         watcher_status: std::sync::Arc<std::sync::RwLock<String>>,
         mic_level: Arc<std::sync::atomic::AtomicU32>,
+        mic_voiced: Arc<std::sync::atomic::AtomicU8>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Msg>();
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
@@ -221,7 +221,9 @@ impl Pipeline {
         {
             let state = Arc::clone(&state);
             let timer_tx = tx.clone();
-            std::thread::spawn(move || handler_loop(app, db, rx, state, timer_tx, mic_level));
+            std::thread::spawn(move || {
+                handler_loop(app, db, rx, state, timer_tx, mic_level, mic_voiced)
+            });
         }
 
         Self {
@@ -397,6 +399,7 @@ fn handler_loop(
     state: Arc<AtomicU8>,
     timer_tx: mpsc::Sender<Msg>,
     mic_level: Arc<std::sync::atomic::AtomicU32>,
+    mic_voiced: Arc<std::sync::atomic::AtomicU8>,
 ) {
     let mut audio = AudioEngine::new();
     let mut current_app = String::new();
@@ -418,17 +421,22 @@ fn handler_loop(
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let last_voice_ms = Arc::clone(&last_voice_ms);
         let level_cell = Arc::clone(&mic_level);
-        audio.set_level_callback(move |level| {
-            // Latest raw level, polled by the pill webview (event push into
-            // a throttled overlay window proved unreliable).
-            level_cell.store(level.to_bits(), Ordering::Relaxed);
-            let now = unix_ms();
-            if level >= VOICE_LEVEL_THRESHOLD {
-                last_voice_ms.store(now, Ordering::Relaxed);
+        let voiced_cell = Arc::clone(&mic_voiced);
+        audio.set_level_callback(move |bar, voiced| {
+            voiced_cell.store(voiced as u8, Ordering::Relaxed);
+            // Latest display level + voice flag, polled by the pill webview
+            // (event push into a throttled overlay window proved unreliable).
+            level_cell.store(bar.to_bits(), Ordering::Relaxed);
+            if voiced {
+                last_voice_ms.store(unix_ms(), Ordering::Relaxed);
             }
+            let now = unix_ms();
             let prev = last_emit.swap(now, Ordering::Relaxed);
             if now.saturating_sub(prev) >= 33 {
-                let _ = emitter.emit("audio-level", level);
+                let _ = emitter.emit(
+                    "audio-level",
+                    serde_json::json!({ "bar": bar, "voiced": voiced }),
+                );
             }
         });
     }
