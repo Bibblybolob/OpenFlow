@@ -370,9 +370,18 @@ unsafe extern "C" fn tap_callback(
         .observe(etype, vk, flags, unix_ms());
     for ev in events {
         let mapped = match ev {
-            MonitorEvent::Down => HotkeyEvent::Down,
-            MonitorEvent::TapUp(_) => HotkeyEvent::TapUp,
-            MonitorEvent::Up(_) => HotkeyEvent::Up,
+            MonitorEvent::Down => {
+                crate::hotkey::set_held(true);
+                HotkeyEvent::Down
+            }
+            MonitorEvent::TapUp(_) => {
+                crate::hotkey::set_held(false);
+                HotkeyEvent::TapUp
+            }
+            MonitorEvent::Up(_) => {
+                crate::hotkey::set_held(false);
+                HotkeyEvent::Up
+            }
             MonitorEvent::Escape => HotkeyEvent::EscapePress,
         };
         if inner.tx.send(mapped).is_err() {

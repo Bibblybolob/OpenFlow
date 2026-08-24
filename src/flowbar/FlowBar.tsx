@@ -55,6 +55,7 @@ export default function FlowBar() {
     new Array(WAVE_BARS).fill(0),
   );
   const [hotkeyHint, setHotkeyHint] = useState("Right Shift");
+  const [toggleMode, setToggleMode] = useState(true);
   const [hovering, setHovering] = useState(false);
   const [micSilent, setMicSilent] = useState(false);
   const [partial, setPartial] = useState<string | null>(null);
@@ -155,6 +156,8 @@ export default function FlowBar() {
       try {
         const hk = await api.getHotkey();
         if (hk.length) setHotkeyHint(hk.join("+"));
+        const hm = await api.getSetting<string>("hotkeyMode");
+        setToggleMode(hm !== "push_to_talk");
       } catch {
         // keep default hint
       }
@@ -494,7 +497,7 @@ export default function FlowBar() {
                 ? (errorText ?? "Error — check Hub")
                 : overrideLabel
                   ? `Style: ${overrideLabel}`
-                  : `Hold ${hotkeyHint} or click`}
+                  : `${toggleMode ? "Press" : "Hold"} ${hotkeyHint} or click`}
             </span>
             {hasError && (
               <button

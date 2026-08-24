@@ -504,6 +504,7 @@ fn handler_loop(
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Hotkey(HotkeyEvent::Down) => {
+                let toggle = hotkey_is_toggle(&db);
                 if mode != Mode::Idle
                     && state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8()
                 {
@@ -512,10 +513,34 @@ fn handler_loop(
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                     continue;
                 }
+                if toggle && mode == Mode::Ptt && !busy.load(Ordering::Relaxed) {
+                    // Toggle activation: second press ends the session,
+                    // exactly like releasing in push-to-talk.
+                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    finish_session(
+                        &app,
+                        &db,
+                        &state,
+                        &mut audio,
+                        &mut current_app,
+                        &busy,
+                        &timer_tx,
+                    );
+                    mode = Mode::Idle;
+                    pending_tap = false;
+                    first_tap_at = None;
+                    continue;
+                }
                 if mode == Mode::Idle {
                     if busy.load(Ordering::Relaxed) {
-                        // Previous dictation still processing — queue a
-                        // start for when the worker finishes.
+                        // Previous dictation still processing. In toggle
+                        // mode a press during processing would otherwise
+                        // ghost-start a session with no key held later —
+                        // ignore it instead of queueing.
+                        if toggle {
+                            emit_warning(&app, "still finishing the last dictation".to_string());
+                            continue;
+                        }
                         pending_start = true;
                         continue;
                     }
@@ -543,6 +568,11 @@ fn handler_loop(
                 }
             }
             Msg::Hotkey(HotkeyEvent::Up) => {
+                // Toggle activation ignores releases entirely; the second
+                // press does the stopping.
+                if hotkey_is_toggle(&db) {
+                    continue;
+                }
                 if mode != Mode::Idle {
                     session_gen.fetch_add(1, Ordering::Relaxed);
                     finish_session(
@@ -557,13 +587,19 @@ fn handler_loop(
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
-                } else if !pending_start {
+                } else if pending_start {
+                    // Released before the queued start fired — the user let
+                    // go, so nothing should begin. This kills the ghost
+                    // sessions that started "right after a dictation".
+                    pending_start = false;
+                    transition(&app, &db, &state, PipelineState::Idle, None, None);
+                } else {
                     transition(&app, &db, &state, PipelineState::Idle, None, None);
                 }
-                // Up while a queued start is pending: the eventual session
-                // will be a sub-250ms tap and gets discarded on its own.
             }
             Msg::Hotkey(HotkeyEvent::TapUp) => match mode {
+                // Toggle activation: releases carry no meaning.
+                _ if hotkey_is_toggle(&db) => {}
                 Mode::Ptt => {
                     let confirmed_double = pending_tap
                         && first_tap_at
@@ -713,7 +749,7 @@ fn handler_loop(
             }
             Msg::SessionDone => {
                 busy.store(false, Ordering::Relaxed);
-                if pending_start && mode == Mode::Idle {
+                if pending_start && mode == Mode::Idle && crate::hotkey::hotkey_held() {
                     // A hotkey press arrived while the worker was busy —
                     // begin that queued dictation now.
                     pending_start = false;
@@ -1003,6 +1039,18 @@ fn mic_preference(db: &Store) -> Option<String> {
         .flatten()
         .and_then(|v| serde_json::from_str::<Option<String>>(&v).ok())
         .flatten()
+}
+
+/// Activation style: "toggle" (press to start, press again to stop — the
+/// default) or "push_to_talk" (hold the key, release to stop, double-tap
+/// for hands-free).
+fn hotkey_is_toggle(db: &Store) -> bool {
+    db.get_setting("hotkeyMode")
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str::<String>(&v).ok())
+        .as_deref()
+        != Some("push_to_talk")
 }
 
 fn cleanup_skip_short(db: &Store) -> bool {

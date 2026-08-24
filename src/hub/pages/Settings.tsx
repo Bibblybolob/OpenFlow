@@ -59,6 +59,7 @@ export default function Settings({
   const [soundEffects, setSoundEffects] = useState(true);
   const [noiseSuppression, setNoiseSuppression] = useState(true);
   const [voiceSensitivity, setVoiceSensitivity] = useState("medium");
+  const [hotkeyMode, setHotkeyMode] = useState("toggle");
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -125,6 +126,7 @@ export default function Settings({
     const se = await api.getSetting<boolean>("soundEffects");
     const ns = await api.getSetting<boolean>("noiseSuppression");
     const vs = await api.getSetting<string>("voiceSensitivity");
+    const hmode = await api.getSetting<string>("hotkeyMode");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
@@ -151,6 +153,7 @@ export default function Settings({
     setSoundEffects(se ?? true);
     setNoiseSuppression(ns ?? true);
     setVoiceSensitivity(vs ?? "medium");
+    setHotkeyMode(hmode ?? "toggle");
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
@@ -280,6 +283,11 @@ export default function Settings({
     await api.setSetting("noiseSuppression", next);
   }
 
+  async function changeHotkeyMode(v: string) {
+    setHotkeyMode(v);
+    await api.setSetting("hotkeyMode", v);
+  }
+
   async function changeVoiceSensitivity(v: string) {
     setVoiceSensitivity(v);
     await api.setSetting("voiceSensitivity", v);
@@ -384,7 +392,16 @@ export default function Settings({
             options={hotkeyOptions.map((k) => ({ value: k, label: k }))}
             onChange={(v) => changeHotkey(v)}
           />
-          <SelectRow
+        <SelectRow
+          label="Activation"
+          value={hotkeyMode}
+          options={[
+            { value: "toggle", label: "Toggle — press to start, press to stop" },
+            { value: "push_to_talk", label: "Push-to-talk — hold the key" },
+          ]}
+          onChange={changeHotkeyMode}
+        />
+        <SelectRow
             label="Language"
             value={language || "auto"}
             options={LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}

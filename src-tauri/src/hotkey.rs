@@ -89,6 +89,18 @@ impl Default for HotkeyConfig {
 
 pub type SharedHotkeyConfig = Arc<RwLock<HotkeyConfig>>;
 
+static HOTKEY_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the trigger key is physically down right now, across backends.
+/// Lets the pipeline refuse ghost-starts queued while a worker was busy.
+pub(crate) fn set_held(held: bool) {
+    HOTKEY_HELD.store(held, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn hotkey_held() -> bool {
+    HOTKEY_HELD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Lifecycle of the keyboard backend, reported to the UI so a dead hotkey
 /// can never be silent again. macOS uses the event-tap backend instead,
 /// which reports plain status strings.
@@ -176,6 +188,7 @@ impl std::fmt::Debug for PushToTalkWatcher {
                 let down = !keys.is_empty() && keys.iter().all(|k| pressed.contains(k));
                 match (down, held) {
                     (true, false) => {
+                        set_held(true);
                         if tx.send(HotkeyEvent::Down).is_err() {
                             return;
                         }
@@ -183,6 +196,7 @@ impl std::fmt::Debug for PushToTalkWatcher {
                         held_since = Instant::now();
                     }
                     (false, true) => {
+                        set_held(false);
                         let hold_ms = held_since.elapsed().as_millis() as u64;
                         let tap_threshold = self.config.read().unwrap().tap_ms;
                         let event = if hold_ms < tap_threshold {
