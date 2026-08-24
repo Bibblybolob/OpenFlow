@@ -107,7 +107,7 @@ jobs:
           tagName: v__VERSION__
           releaseName: "OpenFlow v__VERSION__"
           releaseBody: "See the assets below to download and install OpenFlow."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
