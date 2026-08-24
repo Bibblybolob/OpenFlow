@@ -16,7 +16,10 @@ const MAX_SESSION_SECS: u64 = 360;
 const DOUBLE_TAP_WINDOW_MS: u64 = 700;
 /// Hands-free sessions end themselves after this much silence, so walking
 /// away from the mic doesn't leave a giant accidental transcript behind.
-const HANDS_FREE_SILENCE_STOP_MS: u64 = 5000;
+/// Natural-speech endpointing: stop soon after the voice trails off —
+/// sentence chunks have already been shipping during the session, so this
+/// only ends the tail.
+const HANDS_FREE_SILENCE_STOP_MS: u64 = 1500;
 /// Raw-RMS ceiling under which a transcript is suspect: below this the mic
 /// captured essentially silence/room tone, so whisper-style models tend to
 /// confabulate stock phrases rather than transcribe speech.
@@ -172,6 +175,32 @@ impl Pipeline {
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
+        // Natural-speech flow: the capture callback finalizes sentence spans
+        // after ~1s of trailing silence; a drain thread transcribes and
+        // pastes each one while capture continues.
+        let (chunk_tx, chunk_rx) =
+            mpsc::sync_channel::<crate::audio::SentenceChunk>(crate::audio::CHUNK_CHANNEL_BOUND);
+        {
+            let drain_app = app.clone();
+            let drain_db = Arc::clone(&db);
+            let drain_state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                while let Ok(chunk) = chunk_rx.recv() {
+                    let st = drain_state.load(Ordering::Relaxed);
+                    let active = st == PipelineState::Recording.as_u8()
+                        || st == PipelineState::Paused.as_u8();
+                    if !active {
+                        continue;
+                    }
+                    let app = drain_app.clone();
+                    let db = Arc::clone(&drain_db);
+                    let state = Arc::clone(&drain_state);
+                    std::thread::spawn(move || {
+                        process_sentence_chunk(app, db, state, chunk);
+                    });
+                }
+            });
+        }
         {
             let config = Arc::clone(&hotkey_config);
             let status_app = app.clone();
@@ -221,9 +250,12 @@ impl Pipeline {
         {
             let state = Arc::clone(&state);
             let timer_tx = tx.clone();
-            std::thread::spawn(move || {
-                handler_loop(app, db, rx, state, timer_tx, mic_level, mic_voiced)
-            });
+            let metering = Metering {
+                mic_level,
+                mic_voiced,
+                chunk_tx,
+            };
+            std::thread::spawn(move || handler_loop(app, db, rx, state, timer_tx, metering));
         }
 
         Self {
@@ -392,14 +424,20 @@ enum Mode {
     HandsFree,
 }
 
+/// Tail parameters shared with the capture callback plumbing.
+struct Metering {
+    mic_level: Arc<std::sync::atomic::AtomicU32>,
+    mic_voiced: Arc<std::sync::atomic::AtomicU8>,
+    chunk_tx: mpsc::SyncSender<crate::audio::SentenceChunk>,
+}
+
 fn handler_loop(
     app: AppHandle,
     db: Arc<Store>,
     rx: mpsc::Receiver<Msg>,
     state: Arc<AtomicU8>,
     timer_tx: mpsc::Sender<Msg>,
-    mic_level: Arc<std::sync::atomic::AtomicU32>,
-    mic_voiced: Arc<std::sync::atomic::AtomicU8>,
+    metering: Metering,
 ) {
     let mut audio = AudioEngine::new();
     let mut current_app = String::new();
@@ -420,8 +458,14 @@ fn handler_loop(
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let last_voice_ms = Arc::clone(&last_voice_ms);
+        let Metering {
+            mic_level,
+            mic_voiced,
+            chunk_tx,
+        } = metering;
         let level_cell = Arc::clone(&mic_level);
         let voiced_cell = Arc::clone(&mic_voiced);
+        audio.set_chunk_sender(chunk_tx);
         audio.set_level_callback(move |bar, voiced| {
             voiced_cell.store(voiced as u8, Ordering::Relaxed);
             // Latest display level + voice flag, polled by the pill webview
@@ -1007,6 +1051,203 @@ fn finish(
         Err(e) => fail(app, db, state, e.to_string()),
     }
     timings.report(app);
+}
+
+/// Case-insensitive ASCII phrase-prefix match preserving the rest.
+fn strip_phrase_prefix<'a>(s: &'a str, phrase: &str) -> Option<&'a str> {
+    if s.len() >= phrase.len() && s[..phrase.len()].eq_ignore_ascii_case(phrase) {
+        Some(&s[phrase.len()..])
+    } else {
+        None
+    }
+}
+
+/// Natural-speech flow: one finalized in-session sentence span. Transcribes
+/// and pastes it immediately while capture continues. Deliberately leaner
+/// than [`run_session`]: no state-machine transitions (the pill stays in
+/// Recording), no snippet/command expansion mid-flow, no retry jobs (the
+/// session-end flush re-covers the tail), no chimes.
+fn process_sentence_chunk(
+    app: AppHandle,
+    db: Arc<Store>,
+    state: Arc<AtomicU8>,
+    chunk: crate::audio::SentenceChunk,
+) {
+    let mult = vad_sensitivity_mult(&db);
+    let (work, work_rate) = if noise_suppression_enabled(&db) {
+        (
+            crate::audio::suppress_noise(&chunk.samples, chunk.sample_rate),
+            48_000,
+        )
+    } else {
+        (chunk.samples, chunk.sample_rate)
+    };
+    let regions = crate::audio::voice_regions(&work, work_rate, mult);
+    if regions.voiced_ms < 300 || regions.segments.is_empty() {
+        return; // nothing usable in this span
+    }
+    let cropped: Vec<f32> = regions
+        .segments
+        .iter()
+        .flat_map(|(a, b)| work[*a..*b].iter().copied())
+        .collect();
+    let wav = match crate::audio::encode_wav(
+        &crate::audio::resample_to_16k(&cropped, work_rate),
+        crate::audio::TARGET_SAMPLE_RATE,
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("chunk: wav encode failed: {e}");
+            return;
+        }
+    };
+    let duration_ms =
+        ((cropped.len() as f64 / f64::from(crate::audio::TARGET_SAMPLE_RATE)) * 1000.0) as i64;
+    let recording = crate::audio::Recording {
+        duration_ms,
+        wav,
+        max_frame_rms: regions.max_rms,
+    };
+    run_chunk_session(&app, &db, &state, recording, inject::frontmost_app());
+}
+
+/// STT → optional "scratch that" handling → polish → paste, leaving the
+/// session state machine untouched.
+fn run_chunk_session(
+    app: &AppHandle,
+    db: &Arc<Store>,
+    state: &Arc<AtomicU8>,
+    recording: crate::audio::Recording,
+    target_app: String,
+) {
+    let style_info = db.resolve_style_full(&target_app).ok().flatten();
+    let language = style_info
+        .as_ref()
+        .and_then(|(_, lang)| lang.clone())
+        .or_else(|| {
+            db.get_setting("language")
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str::<String>(&v).ok())
+                .filter(|l| !l.is_empty() && l != "auto")
+        })
+        .unwrap_or_else(|| "auto".to_string());
+
+    let partial_app = app.clone();
+    let result = stt::stream_transcribe(
+        db,
+        &recording.wav,
+        &language,
+        Some(&db_prompt(db)),
+        &mut |cumulative| {
+            let _ = partial_app.emit("stt-partial", serde_json::json!({ "text": cumulative }));
+        },
+    );
+    let raw_text = match result {
+        Ok(r) => r.text,
+        Err(e) => {
+            eprintln!("chunk: transcription failed: {e}");
+            return;
+        }
+    };
+
+    // In-buffer spoken edit: "scratch that" removes the previous paste and
+    // the phrase itself; any remainder after the phrase still gets typed.
+    let stripped = raw_text
+        .trim()
+        .trim_start_matches(|c| "\"'.,!?".contains(c))
+        .trim_start();
+    for phrase in ["scratch that.", "scratch that,", "scratch that"] {
+        if let Some(remainder) = strip_phrase_prefix(stripped, phrase) {
+            let remainder = remainder.trim();
+            match crate::scratch_last() {
+                Ok(()) => emit_warning(app, "removed the last sentence".to_string()),
+                Err(e) => emit_warning(app, format!("scratch failed: {e}")),
+            }
+            if remainder.is_empty() {
+                return;
+            }
+            return paste_chunk_text(
+                app,
+                db,
+                state,
+                ChunkText {
+                    final_text: remainder,
+                    raw_text: remainder,
+                    target_app: &target_app,
+                    language: &language,
+                    duration_ms: recording.duration_ms,
+                },
+            );
+        }
+    }
+
+    if raw_text.trim().is_empty() {
+        return;
+    }
+    // Hallucination guard mirrors the session path.
+    if recording.max_frame_rms < ARTIFACT_RAW_RMS && is_whisper_artifact(&raw_text) {
+        eprintln!("chunk: dropped phantom text {raw_text:?}");
+        return;
+    }
+
+    // Chunks skip the caret-context snapshot on purpose: it belongs to the
+    // session's final flush and must not be consumed mid-flow.
+    let short = raw_text.chars().count() < SHORT_UTTERANCE_CHARS;
+    let polished = if cleanup_enabled(db) && !(short && cleanup_skip_short(db)) {
+        llm::polish(db, &raw_text, &target_app, None).unwrap_or_else(|_| raw_text.clone())
+    } else {
+        raw_text.clone()
+    };
+    crate::learn::observe(db, &raw_text, &polished);
+    paste_chunk_text(
+        app,
+        db,
+        state,
+        ChunkText {
+            final_text: &polished,
+            raw_text: &raw_text,
+            target_app: &target_app,
+            language: &language,
+            duration_ms: recording.duration_ms,
+        },
+    );
+}
+
+struct ChunkText<'a> {
+    final_text: &'a str,
+    raw_text: &'a str,
+    target_app: &'a str,
+    language: &'a str,
+    duration_ms: i64,
+}
+
+fn paste_chunk_text(app: &AppHandle, db: &Arc<Store>, state: &Arc<AtomicU8>, text: ChunkText<'_>) {
+    let ChunkText {
+        final_text,
+        raw_text,
+        target_app,
+        language,
+        duration_ms,
+    } = text;
+    crate::remember_pasted(final_text);
+    if let Err(e) = inject::paste_text(final_text) {
+        emit_warning(app, format!("paste failed: {e}"));
+        return;
+    }
+    if let Ok(transcript) =
+        db.insert_transcript(final_text, raw_text, language, duration_ms, target_app)
+    {
+        // Keep pill in Recording and hand the Hub the new entry.
+        transition(
+            app,
+            db,
+            state,
+            PipelineState::Recording,
+            None,
+            Some(transcript),
+        );
+    }
 }
 
 fn store_anyway(db: &Store, text: &str, raw_text: &str, data: &SessionData) {
