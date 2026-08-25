@@ -553,6 +553,49 @@ fn set_local_model(state: tauri::State<AppState>, model: String) -> store::Resul
     })
 }
 
+/// Catalog of on-device cleanup LLMs with download status.
+#[tauri::command]
+fn local_llm_status() -> Vec<serde_json::Value> {
+    use cloud::local_llm::{is_downloaded, LOCAL_LLMS};
+    LOCAL_LLMS
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "label": m.label,
+                "approxMb": m.approx_mb,
+                "downloaded": is_downloaded(m.id),
+            })
+        })
+        .collect()
+}
+
+/// Downloads an on-device cleanup model, streaming progress to the Hub.
+#[tauri::command]
+fn download_local_llm(app: tauri::AppHandle, model: String) -> Result<(), String> {
+    std::thread::spawn(move || {
+        if let Err(e) = cloud::local_llm::download_model(&app, &model) {
+            eprintln!("local llm download failed: {e}");
+            let _ = app.emit(
+                "local-llm-progress",
+                serde_json::json!({
+                    "type": "error",
+                    "model": model,
+                    "message": e.to_string(),
+                }),
+            );
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn set_local_llm(state: tauri::State<AppState>, model: String) -> store::Result<()> {
+    with_db(&state, |db| {
+        db.set_setting("llmLocalModel", &serde_json::json!(model))
+    })
+}
+
 #[tauri::command]
 fn set_flowbar_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     let window = app
@@ -959,7 +1002,10 @@ pub fn run() {
             open_input_monitoring_settings,
             local_model_status,
             download_local_model,
-            set_local_model
+            set_local_model,
+            local_llm_status,
+            download_local_llm,
+            set_local_llm
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

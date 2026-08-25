@@ -168,4 +168,15 @@ export const api = {
 
   setLocalModel: (model: string) =>
     invoke<void>("set_local_model", { model }),
+
+  localLlmStatus: () =>
+    invoke<
+      { id: string; label: string; approxMb: number; downloaded: boolean }[]
+    >("local_llm_status"),
+
+  downloadLocalLlm: (model: string) =>
+    invoke<void>("download_local_llm", { model }),
+
+  setLocalLlm: (model: string) =>
+    invoke<void>("set_local_llm", { model }),
 };

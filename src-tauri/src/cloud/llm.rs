@@ -23,7 +23,15 @@ pub fn polish(
     context: Option<&str>,
 ) -> Result<String> {
     let cfg = resolve_config(db)?;
-    let style = resolve_style_instructions(db, app_identifier)?.unwrap_or_default();
+
+    // Fully offline path: no HTTP, no key. Everything else posts to a
+    // chat-completions-style endpoint.
+    if cfg.provider == Provider::Local {
+        return super::local_llm::polish_local(db, raw_text, app_identifier, context);
+    }
+
+    let style =
+        super::llm::build_style_instructions(db, app_identifier)?.unwrap_or_default();
     let body = build_request_body(cfg.provider, &cfg.model, raw_text, &style, context, db)?;
 
     let req = match cfg.provider {
@@ -37,6 +45,7 @@ pub fn polish(
         Provider::OpenRouter => super::http_client()?
             .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(&cfg.api_key),
+        Provider::Local => unreachable!("local provider returns before HTTP dispatch"),
     };
 
     let resp = req
@@ -59,7 +68,10 @@ pub fn polish(
 
 /// Tone instructions for a session: an explicit pill override (styleOverride
 /// setting) wins over automatic per-app matching.
-fn resolve_style_instructions(db: &Store, app_identifier: &str) -> Result<Option<String>> {
+pub fn build_style_instructions(
+    db: &Store,
+    app_identifier: &str,
+) -> Result<Option<String>> {
     if let Some(raw) = db.get_setting("styleOverride").ok().flatten() {
         if let Ok(id) = serde_json::from_str::<i64>(&raw) {
             return db.style_instructions_by_id(id);
@@ -78,6 +90,7 @@ pub enum Provider {
     OpenAi,
     Anthropic,
     OpenRouter,
+    Local,
 }
 
 impl Provider {
@@ -86,6 +99,7 @@ impl Provider {
             Provider::OpenAi => "openai",
             Provider::Anthropic => "anthropic",
             Provider::OpenRouter => "openrouter",
+            Provider::Local => "local",
         }
     }
 }
@@ -131,6 +145,7 @@ pub fn resolve_config(db: &Store) -> Result<CleanupConfig> {
         Some("openai") => Some(Provider::OpenAi),
         Some("anthropic") => Some(Provider::Anthropic),
         Some("openrouter") => Some(Provider::OpenRouter),
+        Some("local") => Some(Provider::Local),
         _ => None,
     }
     .or(match (&openai_key, &anthropic_key, &openrouter_key) {
@@ -158,6 +173,12 @@ pub fn resolve_config(db: &Store) -> Result<CleanupConfig> {
             model: model_setting.unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string()),
             provider: Provider::OpenRouter,
         }),
+        // No key needed — the model runs on-device via llama.cpp.
+        Some(Provider::Local) => Ok(CleanupConfig {
+            api_key: String::new(),
+            model: model_setting.unwrap_or_else(|| "qwen3-4b".to_string()),
+            provider: Provider::Local,
+        }),
         None => Err(StoreError::Other(
             "no LLM configured — add an OpenAI, Claude, or OpenRouter API key in Settings"
                 .to_string(),
@@ -181,8 +202,8 @@ pub fn build_request_body(
 ) -> Result<Value> {
     let user_prompt = build_user_prompt(raw_text, style_instructions, context, db)?;
     Ok(match provider {
-        // OpenRouter speaks the OpenAI chat-completions dialect.
-        Provider::OpenAi | Provider::OpenRouter => json!({
+        // OpenRouter mirrors the OpenAI chat-completions dialect.
+        Provider::OpenAi | Provider::OpenRouter | Provider::Local => json!({
             "model": model,
             "temperature": 0,
             "messages": [
@@ -202,7 +223,7 @@ pub fn build_request_body(
     })
 }
 
-fn build_user_prompt(
+pub fn build_user_prompt(
     raw_text: &str,
     style_instructions: &str,
     context: Option<&str>,
@@ -262,7 +283,7 @@ pub fn extract_text(provider: Provider, response_body: &str) -> Result<String> {
         .map_err(|e| StoreError::Other(format!("bad cleanup response: {e}")))?;
     let text = match provider {
         // OpenRouter mirrors the OpenAI response schema.
-        Provider::OpenAi | Provider::OpenRouter => parsed["choices"][0]["message"]["content"]
+        Provider::OpenAi | Provider::OpenRouter | Provider::Local => parsed["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),

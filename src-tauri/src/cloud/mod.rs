@@ -1,4 +1,5 @@
 pub mod llm;
+pub mod local_llm;
 pub mod local_stt;
 pub mod stt;
 

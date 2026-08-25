@@ -35,6 +35,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 base64 = "0.22"
 whisper-rs = "0.14"
 nnnoiseless = "0.5"
+llama-cpp-2 = "0.1"
+encoding_rs = "0.8"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing = "0.1.44"
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
 [target.'cfg(target_os = "windows")'.dependencies]

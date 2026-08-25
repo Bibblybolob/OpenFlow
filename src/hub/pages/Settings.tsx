@@ -17,7 +17,7 @@ import {
 } from "../../lib/pillStyle";
 import { LANGUAGES } from "../../lib/languages";
 
-type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter";
+type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter" | "local";
 type SttProviderChoice = "openai" | "openrouter" | "local";
 
 interface LocalModelInfo {
@@ -48,6 +48,9 @@ export default function Settings({
   const [cleanupEnabled, setCleanupEnabled] = useState(true);
   const [skipShort, setSkipShort] = useState(true);
   const [model, setModel] = useState("");
+  const [localLlms, setLocalLlms] = useState<LocalModelInfo[]>([]);
+  const [localLlm, setLocalLlm] = useState("qwen3-4b");
+  const [llmDownload, setLlmDownload] = useState<string | null>(null);
   const [language, setLanguage] = useState("auto");
   const [hotkey, setHotkey] = useState<string[]>(["Right Shift"]);
   const [hotkeyOptions, setHotkeyOptions] = useState<string[]>([
@@ -137,6 +140,8 @@ export default function Settings({
     const ss = await api.getSetting<boolean>("cleanupSkipShort");
     const lm = await api.getSetting<string>("sttLocalModel");
     const lms = await api.localModelStatus().catch(() => [] as LocalModelInfo[]);
+    const llmId = await api.getSetting<string>("llmLocalModel");
+    const llms = await api.localLlmStatus().catch(() => [] as LocalModelInfo[]);
     const style = await loadPillStyle();
 
     setSavedOpenai(Boolean(ok));
@@ -166,9 +171,50 @@ export default function Settings({
     setSkipShort(ss ?? true);
     setLocalModel(lm ?? "base");
     setLocalModels(lms);
+    setLocalLlm(llmId ?? "qwen3-4b");
+    setLocalLlms(llms);
     setPillStyle(style);
     setAccessibility(await invokeAccessibility());
     setInputMonitoring(await api.inputMonitoringStatus().catch(() => true));
+  }
+
+  useEffect(() => {
+    const unlisten = listen<ModelProgressPayload>(
+      "local-llm-progress",
+      (event) => {
+        const payload = event.payload;
+        if (payload.type === "done") {
+          setLlmDownload(null);
+          api.localLlmStatus().then(setLocalLlms).catch(() => {});
+          return;
+        }
+        if (payload.type === "error") {
+          setLlmDownload(null);
+          return;
+        }
+        setLlmDownload(
+          `${payload.model}: ${payload.downloadedMb}/${payload.totalMb} MB`,
+        );
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
+
+  async function changeLocalLlm(id: string) {
+    setLocalLlm(id);
+    try {
+      await api.setLocalLlm(id);
+      const info = localLlms.find((m) => m.id === id);
+      if (info && !info.downloaded) {
+        setLlmDownload(`${id}: starting…`);
+        await api.downloadLocalLlm(id);
+      }
+    } catch (e) {
+      console.error(e);
+      setLlmDownload(null);
+    }
   }
 
   async function saveKey(kind: "openai" | "anthropic" | "openrouter") {
@@ -734,21 +780,22 @@ export default function Settings({
             <option value="openai">OpenAI</option>
             <option value="anthropic">Claude</option>
             <option value="openrouter">OpenRouter</option>
+            <option value="local">On-device (offline)</option>
           </select>
-          <input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder={
-              provider === "anthropic"
-                ? "claude-3-5-haiku-latest (default)"
-                : provider === "openai"
-                  ? "gpt-4o-mini (default)"
-                  : provider === "openrouter"
-                    ? "anthropic/claude-3.5-haiku (default)"
-                    : "Model override (optional)"
-            }
-            className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
-          />
+          {provider !== "local" && (
+            <input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={
+                provider === "anthropic"
+                  ? "claude-3-5-haiku-latest (default)"
+                  : provider === "openai"
+                    ? "gpt-4o-mini (default)"
+                    : "anthropic/claude-3.5-haiku (default)"
+              }
+              className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
+            />
+          )}
           <button
             onClick={saveCleanup}
             className="rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
@@ -756,6 +803,48 @@ export default function Settings({
             Save
           </button>
         </div>
+        {provider === "local" && (
+          <div
+            className={`flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3 ${
+              cleanupEnabled ? "" : "pointer-events-none opacity-40"
+            }`}
+          >
+            {localLlms.map((m) => (
+              <div key={m.id} className="flex items-center justify-between gap-4">
+                <label className="flex flex-1 items-center gap-3 text-sm">
+                  <input
+                    type="radio"
+                    name="localLlm"
+                    checked={localLlm === m.id}
+                    onChange={() => changeLocalLlm(m.id)}
+                    className="accent-indigo-400"
+                  />
+                  <span className="text-neutral-300">{m.label}</span>
+                  {!m.downloaded && (
+                    <span className="text-xs text-neutral-600">
+                      ~{m.approxMb} MB
+                    </span>
+                  )}
+                </label>
+                <span
+                  className={`shrink-0 text-xs ${
+                    m.downloaded ? "text-emerald-400" : "text-neutral-500"
+                  }`}
+                >
+                  {llmDownload?.startsWith(`${m.id}:`)
+                    ? llmDownload.split(": ", 2)[1] ?? "Downloading…"
+                    : m.downloaded
+                      ? "Ready"
+                      : "Not downloaded"}
+                </span>
+              </div>
+            ))}
+            <p className="text-xs text-neutral-600">
+              Runs entirely offline via llama.cpp (Metal). First use downloads
+              the model.
+            </p>
+          </div>
+        )}
       </section>
 
       <section className="flex flex-col gap-2">

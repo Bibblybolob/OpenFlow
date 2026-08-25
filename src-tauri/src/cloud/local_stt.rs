@@ -73,7 +73,7 @@ pub fn init_models_dir(dir: PathBuf) {
     let _ = MODELS_DIR.set(dir);
 }
 
-fn models_dir() -> PathBuf {
+pub(crate) fn models_dir() -> PathBuf {
     MODELS_DIR
         .get()
         .cloned()
