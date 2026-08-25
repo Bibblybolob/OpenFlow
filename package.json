@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "copy-engine": "node scripts/copy-engine.mjs",
+    "build:offline": "npm run copy-engine && cargo build --release --manifest-path src-tauri/Cargo.toml --features engine && npm run copy-engine && tauri build -- --features engine"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
