@@ -7,6 +7,11 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "cleanup-engine"
+path = "src/bin/cleanup-engine.rs"
+required-features = ["engine"]
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -35,10 +40,14 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 base64 = "0.22"
 whisper-rs = "0.14"
 nnnoiseless = "0.5"
-llama-cpp-2 = "0.1"
-encoding_rs = "0.8"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tracing = "0.1.44"
+# Cleanup-engine-only deps. Kept out of the main binary: llama.cpp vendors
+# its own ggml, and linking both copies into one image (whisper.cpp has the
+# other) breaks C++ static initialization — the app exited silently before
+# main(). The cleanup-engine bin enables this feature.
+llama-cpp-2 = { version = "0.1", optional = true }
+encoding_rs = { version = "0.8", optional = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
+tracing = { version = "0.1.44", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -48,6 +57,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
 ] }
+
+[features]
+engine = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:tracing-subscriber", "dep:tracing"]
 
 [profile.release]
 codegen-units = 1
