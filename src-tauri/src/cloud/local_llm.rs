@@ -191,9 +191,12 @@ fn engine_binary() -> Result<PathBuf> {
         .map_err(|e| StoreError::Other(format!("cannot locate app binary: {e}")))?;
     let mut dir = exe.parent().map(PathBuf::from);
     while let Some(d) = dir {
-        let candidate = d.join("cleanup-engine");
-        if candidate.exists() {
-            return Ok(candidate);
+        // Windows builds carry a .exe suffix; macOS/Linux use the bare name.
+        for name in ["cleanup-engine.exe", "cleanup-engine"] {
+            let candidate = d.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
         dir = d.parent().map(PathBuf::from);
     }
@@ -409,10 +412,25 @@ mod tests {
 #[test]
 #[ignore = "manual: requires a downloaded local cleanup model"]
 fn local_llm_cleans_up_real_dictation() {
-    let home = std::env::var("HOME").expect("HOME set");
-    super::local_stt::init_models_dir(
-        PathBuf::from(home).join("Library/Application Support/com.flowclone.app/models"),
+    // Default per-platform install layouts; override with FLOWCLONE_MODELS_DIR.
+    let dir = std::env::var("FLOWCLONE_MODELS_DIR").map_or_else(
+        |_| {
+            #[cfg(target_os = "macos")]
+            {
+                PathBuf::from(std::env::var("HOME").expect("HOME set")).join(
+                    "Library/Application Support/com.flowclone.app/models",
+                )
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                std::env::var("APPDATA")
+                    .map(|v| PathBuf::from(v).join("com.flowclone.app/models"))
+                    .unwrap_or_else(|_| std::env::temp_dir().join("flowclone-models"))
+            }
+        },
+        PathBuf::from,
     );
+    super::local_stt::init_models_dir(dir);
     assert!(is_downloaded("qwen3-4b"), "qwen3-4b gguf missing on disk");
     let db = Store::open(std::path::Path::new(":memory:")).unwrap();
     db.set_setting("llmProvider", &serde_json::json!("local"))

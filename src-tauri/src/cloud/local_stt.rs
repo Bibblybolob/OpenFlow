@@ -311,10 +311,25 @@ fn turbo_model_transcribes_real_speech() {
         eprintln!("skipping: FLOWCLONE_TURBO_TEST_WAV not set");
         return;
     };
-    let home = std::env::var("HOME").expect("HOME set");
-    init_models_dir(
-        PathBuf::from(home).join("Library/Application Support/com.flowclone.app/models"),
+    // Default per-platform install layouts; override with FLOWCLONE_MODELS_DIR.
+    let dir = std::env::var("FLOWCLONE_MODELS_DIR").map_or_else(
+        |_| {
+            #[cfg(target_os = "macos")]
+            {
+                PathBuf::from(std::env::var("HOME").expect("HOME set")).join(
+                    "Library/Application Support/com.flowclone.app/models",
+                )
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                std::env::var("APPDATA")
+                    .map(|v| PathBuf::from(v).join("com.flowclone.app/models"))
+                    .unwrap_or_else(|_| std::env::temp_dir().join("flowclone-models"))
+            }
+        },
+        PathBuf::from,
     );
+    init_models_dir(dir);
     assert!(
         is_downloaded("large-v3-turbo"),
         "turbo model missing on disk"
