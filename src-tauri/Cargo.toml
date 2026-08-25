@@ -37,7 +37,6 @@ hound = "3.5"
 arboard = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
-base64 = "0.22"
 whisper-rs = "0.14"
 nnnoiseless = "0.5"
 # Cleanup-engine-only deps. Kept out of the main binary: llama.cpp vendors
