@@ -455,15 +455,19 @@ export default function Settings({
             options={hotkeyOptions.map((k) => ({ value: k, label: k }))}
             onChange={(v) => changeHotkey(v)}
           />
-        <SelectRow
-          label="Accuracy"
-          value={sttModel}
-          options={[
-            { value: "gpt-4o-mini-transcribe", label: "Fast — gpt-4o-mini-transcribe" },
-            { value: "gpt-4o-transcribe", label: "Most accurate — gpt-4o-transcribe" },
-          ]}
-          onChange={changeSttModel}
-        />
+        {/* Cloud-only accuracy tiers; hidden on on-device mode where the
+            model picker in Transcription below is the real control. */}
+        {sttProvider !== "local" && (
+          <SelectRow
+            label="Accuracy"
+            value={sttModel}
+            options={[
+              { value: "gpt-4o-mini-transcribe", label: "Fast — gpt-4o-mini-transcribe" },
+              { value: "gpt-4o-transcribe", label: "Most accurate — gpt-4o-transcribe" },
+            ]}
+            onChange={changeSttModel}
+          />
+        )}
         <SelectRow
           label="Activation"
           value={hotkeyMode}
