@@ -4,6 +4,8 @@ version = "0.3.0"
 description = "Cross-platform voice dictation app"
 authors = ["Jonathan Tran"]
 edition = "2021"
+# Two bins (app + cleanup-engine sidecar); tell tauri's bundler which is the app.
+default-run = "flowclone"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
