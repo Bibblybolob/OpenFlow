@@ -3,6 +3,7 @@
   "productName": "FlowClone",
   "version": "0.3.0",
   "identifier": "com.flowclone.app",
+  "mainBinaryName": "flowclone",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
