@@ -17,8 +17,6 @@ import {
 } from "../../lib/pillStyle";
 import { LANGUAGES } from "../../lib/languages";
 
-type ProviderChoice = "auto" | "openai" | "anthropic" | "openrouter" | "local";
-type SttProviderChoice = "openai" | "openrouter" | "local";
 
 interface LocalModelInfo {
   id: string;
@@ -32,22 +30,13 @@ export default function Settings({
 }: {
   onRerunSetup: () => void;
 }) {
-  const [openaiKey, setOpenaiKey] = useState("");
-  const [anthropicKey, setAnthropicKey] = useState("");
-  const [openrouterKey, setOpenrouterKey] = useState("");
-  const [savedOpenai, setSavedOpenai] = useState(false);
-  const [savedAnthropic, setSavedAnthropic] = useState(false);
-  const [savedOpenrouter, setSavedOpenrouter] = useState(false);
   const [flowbarPreset, setFlowbarPreset] = useState("bottom_center");
   const [pillStyle, setPillStyle] = useState<PillStyle>(DEFAULT_PILL_STYLE);
-  const [provider, setProvider] = useState<ProviderChoice>("auto");
-  const [sttProvider, setSttProvider] = useState<SttProviderChoice>("openai");
   const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
   const [localModel, setLocalModel] = useState("base");
   const [localDownload, setLocalDownload] = useState<string | null>(null);
   const [cleanupEnabled, setCleanupEnabled] = useState(true);
   const [skipShort, setSkipShort] = useState(true);
-  const [model, setModel] = useState("");
   const [localLlms, setLocalLlms] = useState<LocalModelInfo[]>([]);
   const [localLlm, setLocalLlm] = useState("qwen3-4b");
   const [llmDownload, setLlmDownload] = useState<string | null>(null);
@@ -63,7 +52,6 @@ export default function Settings({
   const [noiseSuppression, setNoiseSuppression] = useState(true);
   const [voiceSensitivity, setVoiceSensitivity] = useState("medium");
   const [hotkeyMode, setHotkeyMode] = useState("toggle");
-  const [sttModel, setSttModel] = useState("gpt-4o-mini-transcribe");
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
@@ -110,15 +98,6 @@ export default function Settings({
   }, []);
 
   async function refresh() {
-    const ok = await api.getSetting<string>("openaiApiKey");
-    const ak = await api.getSetting<string>("anthropicApiKey");
-    const orkey = await api.getSetting<string>("openrouterApiKey");
-    const prov =
-      ((await api.getSetting<string>("llmProvider")) as ProviderChoice) ?? "auto";
-    const sttProv =
-      ((await api.getSetting<string>("sttProvider")) as SttProviderChoice) ??
-      "openai";
-    const mdl = await api.getSetting<string>("llmModel");
     const lang = (await api.getSetting<string>("language")) ?? "auto";
     const hk = await api.getHotkey().catch(() => ["Right Shift"]);
     const hkOptions = await api
@@ -131,7 +110,6 @@ export default function Settings({
     const ns = await api.getSetting<boolean>("noiseSuppression");
     const vs = await api.getSetting<string>("voiceSensitivity");
     const hmode = await api.getSetting<string>("hotkeyMode");
-    const sm = await api.getSetting<string>("sttModel");
     const as = await api.autostartStatus().catch(() => false);
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
@@ -142,15 +120,6 @@ export default function Settings({
     const llms = await api.localLlmStatus().catch(() => [] as LocalModelInfo[]);
     const style = await loadPillStyle();
 
-    setSavedOpenai(Boolean(ok));
-    setSavedAnthropic(Boolean(ak));
-    setSavedOpenrouter(Boolean(orkey));
-    setOpenaiKey(maskKey(ok));
-    setAnthropicKey(maskKey(ak));
-    setOpenrouterKey(maskKey(orkey));
-    setProvider(prov ?? "auto");
-    setSttProvider(sttProv ?? "openai");
-    setModel(mdl ?? "");
     setLanguage(lang ?? "auto");
     setHotkey(hk.length ? hk : ["Right Shift"]);
     setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "CapsLock", "Right Shift"]);
@@ -161,7 +130,6 @@ export default function Settings({
     setNoiseSuppression(ns ?? true);
     setVoiceSensitivity(vs ?? "medium");
     setHotkeyMode(hmode ?? "toggle");
-    setSttModel(sm ?? "gpt-4o-mini-transcribe");
     setAutostart(as);
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
@@ -214,18 +182,6 @@ export default function Settings({
     }
   }
 
-  async function saveKey(kind: "openai" | "anthropic" | "openrouter") {
-    const value = (kind === "openai"
-      ? openaiKey
-      : kind === "anthropic"
-        ? anthropicKey
-        : openrouterKey
-    ).trim();
-    if (!value || value.includes("•")) return;
-    await api.setSetting(`${kind}ApiKey`, value);
-    refresh();
-  }
-
   async function changeFlowbarPreset(preset: string) {
     setFlowbarPreset(preset);
     try {
@@ -246,12 +202,6 @@ export default function Settings({
     }
   }
 
-  async function saveCleanup() {
-    await api.setSetting("llmProvider", provider);
-    await api.setSetting("llmModel", model.trim() || "");
-    refresh();
-  }
-
   async function changeHotkey(name: string) {
     setHotkey([name]);
     try {
@@ -259,19 +209,6 @@ export default function Settings({
       setHotkey(applied);
     } catch (e) {
       console.error(e);
-    }
-  }
-
-  async function changeSttProvider(choice: SttProviderChoice) {
-    setSttProvider(choice);
-    try {
-      await api.setSetting("sttProvider", choice);
-      if (choice === "openrouter") {
-        await api.setSetting("sttModel", "");
-      }
-    } catch (e) {
-      console.error(e);
-      setSttProvider(choice === "local" ? "openai" : choice);
     }
   }
 
@@ -330,11 +267,6 @@ export default function Settings({
     const next = !noiseSuppression;
     setNoiseSuppression(next);
     await api.setSetting("noiseSuppression", next);
-  }
-
-  async function changeSttModel(v: string) {
-    setSttModel(v);
-    await api.setSetting("sttModel", v);
   }
 
   async function changeHotkeyMode(v: string) {
@@ -446,19 +378,6 @@ export default function Settings({
             options={hotkeyOptions.map((k) => ({ value: k, label: k }))}
             onChange={(v) => changeHotkey(v)}
           />
-        {/* Cloud-only accuracy tiers; hidden on on-device mode where the
-            model picker in Transcription below is the real control. */}
-        {sttProvider !== "local" && (
-          <SelectRow
-            label="Accuracy"
-            value={sttModel}
-            options={[
-              { value: "gpt-4o-mini-transcribe", label: "Fast — gpt-4o-mini-transcribe" },
-              { value: "gpt-4o-transcribe", label: "Most accurate — gpt-4o-transcribe" },
-            ]}
-            onChange={changeSttModel}
-          />
-        )}
         <SelectRow
           label="Activation"
           value={hotkeyMode}
@@ -539,27 +458,15 @@ export default function Settings({
           Transcription
         </h2>
         <div className="flex gap-2">
-          <select
-            value={sttProvider}
-            onChange={(e) =>
-              changeSttProvider(e.target.value as SttProviderChoice)
-            }
-            className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm outline-none focus:border-indigo-400/60"
-          >
-            <option value="openai">OpenAI Whisper</option>
-            <option value="openrouter">OpenRouter (audio model)</option>
-            <option value="local">On-device (whisper.cpp)</option>
-          </select>
+          <div className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-neutral-300">
+            On-device (whisper.cpp)
+          </div>
           <p className="flex-1 self-center text-xs text-neutral-600">
-            {sttProvider === "openrouter"
-              ? "Sends audio to an OpenRouter chat model — works with your existing OpenRouter key."
-              : sttProvider === "local"
-                ? "Runs entirely offline — fastest and most private. First use downloads the model."
-                : "Uses your OpenAI key (sk-…). An OpenRouter key here will be rejected."}
+            Runs entirely offline — fastest and most private. First use
+            downloads the model.
           </p>
         </div>
-        {sttProvider === "local" && (
-          <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+        <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
             {localModels.map((m) => (
               <div key={m.id} className="flex items-center justify-between gap-4">
                 <label className="flex flex-1 items-center gap-3 text-sm">
@@ -591,7 +498,6 @@ export default function Settings({
               </div>
             ))}
           </div>
-        )}
       </section>
 
       <section className="flex flex-col gap-2">
@@ -708,43 +614,6 @@ export default function Settings({
 
       <section className="flex flex-col gap-3">
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
-          API keys
-        </h2>
-        <KeyRow
-          label="OpenAI"
-          hint="Used for transcription; also available for cleanup"
-          saved={savedOpenai}
-          value={openaiKey}
-          onChange={setOpenaiKey}
-          onSave={() => saveKey("openai")}
-          placeholder="sk-…"
-        />
-        <KeyRow
-          label="Claude (Anthropic)"
-          hint="Optional alternative for the cleanup step"
-          saved={savedAnthropic}
-          value={anthropicKey}
-          onChange={setAnthropicKey}
-          onSave={() => saveKey("anthropic")}
-          placeholder="sk-ant-…"
-        />
-        <KeyRow
-          label="OpenRouter"
-          hint="One key, hundreds of cleanup models"
-          saved={savedOpenrouter}
-          value={openrouterKey}
-          onChange={setOpenrouterKey}
-          onSave={() => saveKey("openrouter")}
-          placeholder="sk-or-…"
-        />
-        <p className="text-xs text-neutral-600">
-          Keys are stored locally on this device. Environment variables
-          OPENAI_API_KEY / ANTHROPIC_API_KEY take precedence when set.
-        </p>
-      </section>
-
-      <section className="flex flex-col gap-3">
-        <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
           Cleanup
         </h2>
         <ToggleRow
@@ -760,40 +629,11 @@ export default function Settings({
           onChange={toggleSkipShort}
         />
         <div className={`flex gap-2 ${cleanupEnabled ? "" : "pointer-events-none opacity-40"}`}>
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value as ProviderChoice)}
-            className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm outline-none focus:border-indigo-400/60"
-          >
-            <option value="auto">Auto-detect</option>
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Claude</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="local">On-device (offline)</option>
-          </select>
-          {provider !== "local" && (
-            <input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={
-                provider === "anthropic"
-                  ? "claude-3-5-haiku-latest (default)"
-                  : provider === "openai"
-                    ? "gpt-4o-mini (default)"
-                    : "anthropic/claude-3.5-haiku (default)"
-              }
-              className="flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
-            />
-          )}
-          <button
-            onClick={saveCleanup}
-            className="rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
-          >
-            Save
-          </button>
+          <div className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-neutral-300">
+            On-device (offline)
+          </div>
         </div>
-        {provider === "local" && (
-          <div
+        <div
             className={`flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3 ${
               cleanupEnabled ? "" : "pointer-events-none opacity-40"
             }`}
@@ -833,7 +673,6 @@ export default function Settings({
               the model.
             </p>
           </div>
-        )}
       </section>
 
       <section className="flex flex-col gap-2">
@@ -952,51 +791,6 @@ function ToggleRow({
   );
 }
 
-function KeyRow({
-  label,
-  hint,
-  saved,
-  value,
-  onChange,
-  onSave,
-  placeholder,
-}: {
-  label: string;
-  hint: string;
-  saved: boolean;
-  value: string;
-  onChange: (v: string) => void;
-  onSave: () => void;
-  placeholder: string;
-}) {
-  const dirty = Boolean(value) && !value.includes("•");
-  return (
-    <div className="flex items-center gap-3">
-      <div className="w-40 shrink-0">
-        <p className="text-sm text-neutral-300">{label}</p>
-        <p className="text-[11px] leading-tight text-neutral-600">{hint}</p>
-      </div>
-      <input
-        type="password"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/[0.04] px-4 py-2 text-sm outline-none placeholder:text-neutral-600 focus:border-indigo-400/60"
-      />
-      <button
-        onClick={onSave}
-        disabled={!dirty}
-        className={`shrink-0 rounded-lg px-4 py-2 text-sm font-medium transition ${
-          dirty
-            ? "bg-indigo-500/90 text-white hover:bg-indigo-500"
-            : "border border-white/10 text-neutral-500"
-        }`}
-      >
-        {saved ? "Update" : "Save"}
-      </button>
-    </div>
-  );
-}
 
 const KEY_SEEN_POLL_MS = 500;
 
@@ -1160,11 +954,6 @@ function PillPreview({ style }: { style: PillStyle }) {
   );
 }
 
-function maskKey(key: string | null): string {
-  if (!key) return "";
-  if (key.length <= 8) return "••••••••";
-  return `${key.slice(0, 4)}${"•".repeat(Math.max(key.length - 8, 4))}${key.slice(-4)}`;
-}
 
 async function invokeAccessibility(): Promise<boolean> {
   try {
