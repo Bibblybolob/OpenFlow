@@ -204,7 +204,7 @@ impl Pipeline {
             });
             #[cfg(not(target_os = "macos"))]
             std::thread::spawn(move || {
-                use hotkey::{HotkeyWatcher, PushToTalkWatcher, WatcherStatus};
+                use crate::hotkey::{HotkeyWatcher, PushToTalkWatcher, WatcherStatus};
                 PushToTalkWatcher {
                     config,
                     poll_interval_ms: 20,
@@ -437,7 +437,10 @@ fn handler_loop(
     // counter that invalidates stale hands-free auto-stop watchdogs.
     let last_voice_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let session_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let Metering { mic_level, mic_voiced } = metering;
+    let Metering {
+        mic_level,
+        mic_voiced,
+    } = metering;
     {
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1122,15 +1125,6 @@ fn finish(
         Err(e) => fail(app, db, state, e.to_string()),
     }
     timings.report(app);
-}
-
-/// Case-insensitive ASCII phrase-prefix match preserving the rest.
-fn strip_phrase_prefix<'a>(s: &'a str, phrase: &str) -> Option<&'a str> {
-    if s.len() >= phrase.len() && s[..phrase.len()].eq_ignore_ascii_case(phrase) {
-        Some(&s[phrase.len()..])
-    } else {
-        None
-    }
 }
 
 fn store_anyway(db: &Store, text: &str, raw_text: &str, data: &SessionData) {

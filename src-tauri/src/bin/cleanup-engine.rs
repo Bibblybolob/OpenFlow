@@ -19,8 +19,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 
@@ -109,10 +109,7 @@ fn handle_load(req: &serde_json::Value) -> Result<serde_json::Value, String> {
         .get("path")
         .and_then(|v| v.as_str())
         .ok_or("missing path")?;
-    let gpu_layers = req
-        .get("gpuLayers")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(99) as u32;
+    let gpu_layers = req.get("gpuLayers").and_then(|v| v.as_u64()).unwrap_or(99) as u32;
 
     let mut guard = engine().lock().map_err(|e| e.to_string())?;
     // Reload only when the path actually changed.
@@ -120,12 +117,8 @@ fn handle_load(req: &serde_json::Value) -> Result<serde_json::Value, String> {
         let params = LlamaModelParams::default()
             .with_n_gpu_layers(gpu_layers)
             .with_use_mmap(false);
-        let model = LlamaModel::load_from_file(
-            &guard.backend,
-            Path::new(path),
-            &params,
-        )
-        .map_err(|e| format!("failed to load model: {e}"))?;
+        let model = LlamaModel::load_from_file(&guard.backend, Path::new(path), &params)
+            .map_err(|e| format!("failed to load model: {e}"))?;
         guard.model = Some(model);
     }
     Ok(serde_json::json!({"ok": true}))
@@ -158,7 +151,11 @@ fn handle_cleanup(req: &serde_json::Value) -> Result<serde_json::Value, String> 
     let mut ctx = model
         .new_context(&guard.backend, ctx_params)
         .map_err(|e| format!("context failed: {e}"))?;
-    eprintln!("engine: prompt {} chars -> {} tokens", prompt.len(), tokens.len());
+    eprintln!(
+        "engine: prompt {} chars -> {} tokens",
+        prompt.len(),
+        tokens.len()
+    );
 
     let mut batch = LlamaBatch::new(tokens.len(), 1);
     let last_index = tokens.len() - 1;
@@ -168,7 +165,8 @@ fn handle_cleanup(req: &serde_json::Value) -> Result<serde_json::Value, String> 
             .add(*token, pos, &[0], i == last_index)
             .map_err(|e| format!("batch failed: {e}"))?;
     }
-    ctx.decode(&mut batch).map_err(|e| format!("decode failed: {e}"))?;
+    ctx.decode(&mut batch)
+        .map_err(|e| format!("decode failed: {e}"))?;
 
     let mut out = String::new();
     for step in 0..MAX_NEW_TOKENS {

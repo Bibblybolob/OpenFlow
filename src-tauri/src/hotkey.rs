@@ -155,6 +155,16 @@ const WATCHER_RETRY_MS: u64 = 3000;
 
 #[cfg(not(target_os = "macos"))]
 impl std::fmt::Debug for PushToTalkWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushToTalkWatcher")
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("has_status_callback", &self.on_status.is_some())
+            .finish()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl HotkeyWatcher for PushToTalkWatcher {
     fn spawn(self, tx: Sender<HotkeyEvent>) -> thread::JoinHandle<()> {
         thread::spawn(move || {
             let device = loop {

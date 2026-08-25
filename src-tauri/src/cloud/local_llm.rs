@@ -7,7 +7,7 @@
 
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -157,10 +157,7 @@ pub fn download_model(app: &tauri::AppHandle, id: &str) -> Result<PathBuf> {
     }
 
     std::fs::rename(&partial, &dest)?;
-    let _ = app.emit(
-        "local-llm-progress",
-        json!({ "type": "done", "model": id }),
-    );
+    let _ = app.emit("local-llm-progress", json!({ "type": "done", "model": id }));
     Ok(dest)
 }
 
@@ -179,6 +176,15 @@ struct EngineProcess {
 }
 
 static ENGINE: OnceLock<Mutex<Option<EngineProcess>>> = OnceLock::new();
+
+impl Drop for EngineProcess {
+    fn drop(&mut self) {
+        // Dropping a Child handle does not stop the process; without this,
+        // every crash-retry respawns a new engine while the old one leaks.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 fn engine_slot() -> &'static Mutex<Option<EngineProcess>> {
     ENGINE.get_or_init(|| Mutex::new(None))
@@ -233,7 +239,10 @@ fn spawn_engine() -> Result<EngineProcess> {
 impl EngineProcess {
     /// Sends one request and reads its reply. The engine replies exactly
     /// once per request line, so a plain read_line pairs them up.
-    fn request(&mut self, payload: serde_json::Value) -> std::result::Result<serde_json::Value, String> {
+    fn request(
+        &mut self,
+        payload: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
         self.next_id += 1;
         let mut req = payload;
         req["id"] = json!(self.next_id);
@@ -263,7 +272,7 @@ impl EngineProcess {
         serde_json::from_str(&reply).map_err(|e| format!("bad engine reply: {e}"))
     }
 
-    fn ensure_loaded(&mut self, path: &PathBuf) -> std::result::Result<(), String> {
+    fn ensure_loaded(&mut self, path: &Path) -> std::result::Result<(), String> {
         let path_str = path.to_string_lossy().into_owned();
         if self.loaded_path.as_deref() == Some(path_str.as_str()) {
             return Ok(());
@@ -288,7 +297,7 @@ impl EngineProcess {
 /// Ensures an engine process exists and has the requested model loaded.
 /// Respawns once if the previous process died mid-flight.
 fn with_engine<T>(
-    path: &PathBuf,
+    path: &Path,
     f: impl Fn(&mut EngineProcess) -> std::result::Result<T, String>,
 ) -> Result<T> {
     let slot = engine_slot();
@@ -299,7 +308,7 @@ fn with_engine<T>(
     let engine = guard.as_mut().expect("just ensured");
     match engine.ensure_loaded(path).and_then(|_| f(engine)) {
         Ok(v) => Ok(v),
-        Err(e) => {
+        Err(_first_err) => {
             // One retry on a fresh process covers engine crashes.
             let _ = guard.take();
             *guard = Some(spawn_engine()?);
@@ -307,7 +316,7 @@ fn with_engine<T>(
             engine
                 .ensure_loaded(path)
                 .and_then(|_| f(engine))
-                .map_err(|e2| StoreError::Other(e2))
+                .map_err(StoreError::Other)
         }
     }
 }
@@ -363,10 +372,7 @@ pub fn polish_local(
         }
     })?;
 
-    eprintln!(
-        "local llm \"{id}\" cleaned up in {:?}",
-        started.elapsed()
-    );
+    eprintln!("local llm \"{id}\" cleaned up in {:?}", started.elapsed());
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err(StoreError::Other("cleanup returned empty text".to_string()));
@@ -417,9 +423,8 @@ fn local_llm_cleans_up_real_dictation() {
         |_| {
             #[cfg(target_os = "macos")]
             {
-                PathBuf::from(std::env::var("HOME").expect("HOME set")).join(
-                    "Library/Application Support/com.flowclone.app/models",
-                )
+                PathBuf::from(std::env::var("HOME").expect("HOME set"))
+                    .join("Library/Application Support/com.flowclone.app/models")
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -440,8 +445,8 @@ fn local_llm_cleans_up_real_dictation() {
     let raw = "um so basically uh send the report to John wait no to Jane tomorrow \
                and um you know also new line thanks for the update";
     let started = std::time::Instant::now();
-    let out = polish_local(&db, raw, "com.example.app", None)
-        .expect("local cleanup via engine sidecar");
+    let out =
+        polish_local(&db, raw, "com.example.app", None).expect("local cleanup via engine sidecar");
     eprintln!("gate took {:?}, cleaned: {out}", started.elapsed());
     assert!(!out.trim().is_empty());
 }

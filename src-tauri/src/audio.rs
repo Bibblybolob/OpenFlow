@@ -790,10 +790,6 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
-
-
-
-
     #[test]
     fn normalize_boosts_quiet_captures_to_target() {
         let rate = 48_000usize;

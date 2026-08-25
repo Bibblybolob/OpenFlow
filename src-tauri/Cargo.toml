@@ -62,7 +62,10 @@ engine = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:tracing-subscriber", "dep:t
 
 [profile.release]
 codegen-units = 1
-lto = true
+# thin, not fat: fat LTO broke with rustc 1.98.0 ("failed to load bitcode of
+# module" + duplicate _EMBED_INFO_PLIST from embed_plist) on every full link;
+# thin produces a working binary of near-identical size/speed.
+lto = "thin"
 opt-level = "s"
 strip = true
 

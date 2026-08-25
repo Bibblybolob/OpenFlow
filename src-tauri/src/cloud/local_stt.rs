@@ -316,9 +316,8 @@ fn turbo_model_transcribes_real_speech() {
         |_| {
             #[cfg(target_os = "macos")]
             {
-                PathBuf::from(std::env::var("HOME").expect("HOME set")).join(
-                    "Library/Application Support/com.flowclone.app/models",
-                )
+                PathBuf::from(std::env::var("HOME").expect("HOME set"))
+                    .join("Library/Application Support/com.flowclone.app/models")
             }
             #[cfg(not(target_os = "macos"))]
             {

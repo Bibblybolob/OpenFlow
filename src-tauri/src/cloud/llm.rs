@@ -24,10 +24,7 @@ pub fn polish(
 
 /// Tone instructions for a session: an explicit pill override (styleOverride
 /// setting) wins over automatic per-app matching.
-pub fn build_style_instructions(
-    db: &Store,
-    app_identifier: &str,
-) -> Result<Option<String>> {
+pub fn build_style_instructions(db: &Store, app_identifier: &str) -> Result<Option<String>> {
     if let Some(raw) = db.get_setting("styleOverride").ok().flatten() {
         if let Ok(id) = serde_json::from_str::<i64>(&raw) {
             return db.style_instructions_by_id(id);
@@ -132,8 +129,8 @@ mod tests {
     }
     use crate::store::Store;
 
-    fn store() -> Store {
+    #[allow(dead_code)] // kept for ad-hoc test debugging
+    fn _store() -> Store {
         Store::open(std::path::Path::new(":memory:")).unwrap()
     }
-
 }
