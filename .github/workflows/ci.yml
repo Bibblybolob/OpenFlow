@@ -39,6 +39,12 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # tauri-build validates the externalBin entry whenever the crate
+      # compiles, even before the engine binary exists — stage a placeholder
+      # on fresh checkouts so fmt/clippy/tests can run.
+      - name: Stage cleanup-engine placeholder
+        run: npm run copy-engine
+
       - name: Frontend typecheck & build
         run: npm run build
 
@@ -87,6 +93,18 @@ jobs:
 
       - name: Install frontend deps
         run: npm ci
+
+      # tauri-build validates the externalBin entry whenever the crate
+      # compiles, so stage the sidecar before building. Cross-compile legs
+      # (--target) output under target/<triple>/release — pass the triple.
+      - name: Stage cleanup-engine placeholder
+        run: node scripts/copy-engine.mjs ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
+
+      - name: Build cleanup-engine helper
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --features engine ${{ matrix.args }}
+
+      - name: Stage real cleanup-engine for bundling
+        run: node scripts/copy-engine.mjs ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
 
       - name: Build and release
         uses: tauri-apps/tauri-action@v0

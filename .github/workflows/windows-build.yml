@@ -1,0 +1,77 @@
+name: windows-build
+
+# Builds the fully-offline Windows installer (NSIS + MSI) with the
+# cleanup-engine sidecar (local Qwen3-4B / whisper cleanup stack) bundled.
+# Runs on every push to main so a fresh download is always available;
+# final on-device smoke test is manual (see plan checklist).
+#
+# Notes:
+# - windows-latest ships VS Build Tools (MSVC link), CMake, Ninja and LLVM
+#   preinstalled, which is everything llama-cpp-sys-2 (vendored llama.cpp)
+#   needs. No choco installs required.
+# - CPU-only llama.cpp by default. To try Vulkan later: add `-vv` feature
+#   work + the Vulkan SDK here; kept simple/CPU-first for now.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # tauri-build validates the externalBin entry whenever the crate
+      # compiles, even before the engine exists — stage a placeholder first,
+      # then replace it with the real binary after the engine build.
+      - name: Stage cleanup-engine placeholder
+        run: npm run copy-engine
+
+      - name: Build cleanup-engine helper
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --features engine
+
+      - name: Stage real cleanup-engine for bundling
+        run: npm run copy-engine
+
+      - name: Build app and bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signature key: stored as repo secrets (same as ci.yml).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # Bundles NSIS + MSI; frontend build runs via beforeBuildCommand.
+          args: --features engine
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowClone-windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
