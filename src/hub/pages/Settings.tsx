@@ -57,6 +57,29 @@ export default function Settings({
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
   const [inputMonitoring, setInputMonitoring] = useState<boolean | null>(null);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [availableVersion, setAvailableVersion] = useState<string | null>(
+    null,
+  );
+
+  // Poll the rolling dev channel on mount: a newer main build shows the
+  // "Update now" pill without the user hunting for the button.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .appVersion()
+      .then((v) => !cancelled && setAppVersion(v))
+      .catch(() => {});
+    api
+      .checkForUpdate()
+      .then((v) => !cancelled && setAvailableVersion(v))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   useEffect(() => {
     refresh();
@@ -317,15 +340,28 @@ export default function Settings({
     try {
       const version = await api.checkForUpdate();
       if (version) {
+        setAvailableVersion(version);
         setUpdateStatus(`Version ${version} available — installing…`);
         await api.installUpdate();
         setUpdateStatus("Installed. Restarting…");
       } else {
+        setAvailableVersion(null);
         setUpdateStatus("You're up to date.");
       }
     } catch (e) {
       console.error(e);
       setUpdateStatus(String(e).replace(/^.*failed: /, "Check failed: "));
+    }
+  }
+
+  async function updateNow() {
+    setUpdateStatus(`Updating to ${availableVersion}…`);
+    try {
+      await api.installUpdate();
+      setUpdateStatus("Installed. Restarting…");
+    } catch (e) {
+      console.error(e);
+      setUpdateStatus(String(e).replace(/^.*failed: /, "Update failed: "));
     }
   }
 
@@ -351,11 +387,20 @@ export default function Settings({
         </h2>
         <div className="flex items-center justify-between rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
           <span className="text-sm text-neutral-300">
-            Version {import.meta.env.PACKAGE_VERSION ?? "0.1.0"}
+            Version{" "}
+            {appVersion || (import.meta.env.PACKAGE_VERSION ?? "0.1.0")}
           </span>
           <div className="flex items-center gap-3">
             {updateStatus && (
               <span className="text-xs text-neutral-500">{updateStatus}</span>
+            )}
+            {availableVersion && !updateStatus && (
+              <button
+                onClick={updateNow}
+                className="rounded-md bg-indigo-500/90 px-3 py-1 text-xs font-medium text-white transition hover:bg-indigo-400"
+              >
+                Update now → {availableVersion}
+              </button>
             )}
             <button
               onClick={checkForUpdate}

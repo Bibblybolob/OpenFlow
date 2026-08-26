@@ -158,6 +158,8 @@ export const api = {
 
   installUpdate: () => invoke<void>("install_update"),
 
+  appVersion: () => invoke<string>("app_version"),
+
   localModelStatus: () =>
     invoke<
       { id: string; label: string; approxMb: number; downloaded: boolean }[]

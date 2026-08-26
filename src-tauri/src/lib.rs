@@ -708,6 +708,11 @@ fn set_flowbar_preset(
 }
 
 #[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
 async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_updater::UpdaterExt;
     let update = app
@@ -993,6 +998,7 @@ pub fn run() {
             download_local_model,
             set_local_model,
             local_llm_status,
+            app_version,
             download_local_llm,
             set_local_llm
         ])
