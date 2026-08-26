@@ -139,6 +139,9 @@ jobs:
   dev-build:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: check
+    # Same stamp on every leg (run_number is shared), exposed to dev-publish.
+    outputs:
+      version: ${{ steps.stamp.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -182,6 +185,7 @@ jobs:
       # greater than the previous run's stamp — the updater compares semver,
       # so each push must out-version the last.
       - name: Stamp rolling dev version
+        id: stamp
         shell: bash
         env:
           BASE_VERSION: ${{ vars.DEV_BASE_VERSION || '0.3.1' }}
@@ -308,20 +312,18 @@ jobs:
             const fs=require('fs'), path=require('path');
             const dir='dist-dev';
             const version=process.env.DEV_VERSION;
+            if (!version) throw new Error('DEV_VERSION missing');
             const base='https://github.com/${{ github.repository }}/releases/download/dev/';
             const platforms={};
-            const map={
-              'aarch64-apple-darwin.FlowClone.app.tar.gz':['darwin-aarch64','aarch64-apple-darwin.FlowClone.app.tar.gz'],
-              'x86_64-apple-darwin.FlowClone.app.tar.gz':['darwin-x86_64','x86_64-apple-darwin.FlowClone.app.tar.gz'],
-              'FlowClone_'+version+'_x64-setup.exe':['windows-x86_64','FlowClone_'+version+'_x64-setup.exe']
-            };
+            const targets=[
+              ['aarch64-apple-darwin.FlowClone.app.tar.gz','darwin-aarch64'],
+              ['x86_64-apple-darwin.FlowClone.app.tar.gz','darwin-x86_64'],
+              ['FlowClone_'+version+'_x64-setup.exe','windows-x86_64']
+            ];
             for(const f of fs.readdirSync(dir).filter(f=>f.endsWith('.sig'))){
-              let entry=null;
-              for(const [k,[plat,art]] of Object.entries(map)){
-                if(f===art+'.sig') entry=[plat,art];
-              }
-              if(!entry){ console.log('skip (no updater target): '+f); continue; }
-              const [plat,art]=entry;
+              const hit=targets.find(t => t[0]+'.sig'===f);
+              if(!hit){ console.log('skip (no updater target): '+f); continue; }
+              const [art,plat]=hit;
               platforms[plat]={signature:fs.readFileSync(path.join(dir,f),'utf8').trim(), url:base+art};
             }
             const manifest={version, notes:'Rolling build of main ('+(process.env.GITHUB_SHA||'').slice(0,7)+')', pub_date:new Date().toISOString(), platforms};
