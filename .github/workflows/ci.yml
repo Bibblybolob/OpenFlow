@@ -233,13 +233,18 @@ jobs:
         shell: bash
         run: |
           # Cross-compile legs bundle under target/<triple>/release; host
-          # legs under target/release — search both.
+          # legs under target/release. nullglob + [ -d ] guards keep find
+          # from exiting non-zero on paths that don't exist on this leg.
+          shopt -s nullglob
           mkdir -p dist-dev
-          find src-tauri/target/*/release/bundle src-tauri/target/release/bundle \
-            \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-               -o -name "*-setup.exe" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
-               -o -name "latest.json" \) 2>/dev/null \
-            -exec cp {} dist-dev/ \;
+          for d in src-tauri/target/*/release/bundle src-tauri/target/release/bundle; do
+            [ -d "$d" ] || continue
+            find "$d" \
+              \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
+                 -o -name "*-setup.exe" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
+                 -o -name "latest.json" \) \
+              -exec cp {} dist-dev/ \;
+          done
           ls -la dist-dev/
           [ -n "$(ls -A dist-dev)" ]
 
