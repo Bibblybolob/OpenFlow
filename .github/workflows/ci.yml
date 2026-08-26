@@ -232,12 +232,16 @@ jobs:
       - name: Collect bundle outputs
         shell: bash
         run: |
+          # Cross-compile legs bundle under target/<triple>/release; host
+          # legs under target/release — search both.
           mkdir -p dist-dev
-          find src-tauri/target/release/bundle \
+          find src-tauri/target/*/release/bundle src-tauri/target/release/bundle \
             \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-               -o -name "*-setup.exe" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \) \
+               -o -name "*-setup.exe" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
+               -o -name "latest.json" \) 2>/dev/null \
             -exec cp {} dist-dev/ \;
           ls -la dist-dev/
+          [ -n "$(ls -A dist-dev)" ]
 
       - uses: actions/upload-artifact@v4
         with:
