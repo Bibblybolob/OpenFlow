@@ -188,6 +188,7 @@ jobs:
         run: |
           VER="${BASE_VERSION%.*}.$((${BASE_VERSION##*.} + 1))-dev.${GITHUB_RUN_NUMBER}"
           echo "DEV_VERSION=$VER" >> "$GITHUB_ENV"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "stamp: $VER"
           # GITHUB_ENV only applies to LATER steps — export for this shell.
           export DEV_VERSION="$VER"
@@ -278,8 +279,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view dev >/dev/null 2>&1 || \
-            gh release create dev --title "Latest main build" \
-              --prerelease --notes-filename /dev/null
+            gh release create dev --title "Latest main build" --prerelease \
+              --notes "Rolling build of main. Installed apps offer it via Update now."
 
       # Asset names embed the stamped version, so old ones would pile up on
       # the rolling release — clear them before uploading this run's set.
@@ -290,39 +291,52 @@ jobs:
           gh api repos/${{ github.repository }}/releases/tags/dev --jq '.assets[].id' |
             xargs -r -n1 -I{} gh api -X DELETE repos/${{ github.repository }}/releases/assets/{}
 
+      # Build latest.json from the .sig files: each sig names its artifact
+      # and carries the minisign signature; the download URL is the fixed
+      # per-release asset path the updater can fetch.
+      - name: Generate updater manifest
+        run: |
+          node -e "
+            const fs=require('fs'), path=require('path');
+            const dir='dist-dev';
+            const version=process.env.DEV_VERSION;
+            const base='https://github.com/${{ github.repository }}/releases/download/dev/';
+            const platforms={};
+            const map={
+              'aarch64.dmg':['darwin-aarch64','FlowClone_'+version+'_aarch64.app.tar.gz'],
+              'x64.dmg':   ['darwin-x86_64', 'FlowClone_'+version+'_x64.app.tar.gz'],
+              'x64-setup.exe':['windows-x86_64','FlowClone_'+version+'_x64-setup.exe']
+            };
+            for(const f of fs.readdirSync(dir).filter(f=>f.endsWith('.sig'))){
+              let entry=null;
+              for(const [k,[plat,art]] of Object.entries(map)){
+                if(f===art+'.sig') entry=[plat,art];
+              }
+              if(!entry){ console.log('skip (no updater target): '+f); continue; }
+              const [plat,art]=entry;
+              platforms[plat]={signature:fs.readFileSync(path.join(dir,f),'utf8').trim(), url:base+art};
+            }
+            const manifest={version, notes:'Rolling build of main ('+(process.env.GITHUB_SHA||'').slice(0,7)+')', pub_date:new Date().toISOString(), platforms};
+            fs.writeFileSync(path.join(dir,'latest.json'), JSON.stringify(manifest,null,2));
+            console.log(JSON.stringify(manifest,null,2));
+            if(Object.keys(platforms).length<3) throw new Error('expected 3 platform entries');
+          "
+        env:
+          DEV_VERSION: ${{ needs.dev-build.outputs.version }}
+          GITHUB_SHA: ${{ github.sha }}
+
       - name: Upload fresh asset set
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload dev dist-dev/* --clobber
 
-      # Each leg emitted its own latest.json (its platforms only); union the
-      # per-platform entries into one manifest the updater can serve to all.
-      - name: Merge updater manifests into latest.json
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          node -e "
-            const fs=require('fs');
-            const files=fs.readdirSync('dist-dev').filter(f=>f.endsWith('.json'));
-            const byPlatform={}; let version=null, pubDate=null;
-            for(const f of files){
-              const j=JSON.parse(fs.readFileSync('dist-dev/'+f,'utf8'));
-              Object.assign(byPlatform, j.platforms||{});
-              version=j.version||version; pub_date=j.pub_date||pubDate;
-            }
-            const merged={version, notes:'', pub_date: new Date().toISOString(), platforms:byPlatform};
-            fs.writeFileSync('dist-dev/latest.json', JSON.stringify(merged,null,2));
-            console.log(JSON.stringify(merged,null,2));
-          "
-          gh release upload dev dist-dev/latest.json --clobber
-
       - name: Point release at this run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEV_VERSION: ${{ needs.dev-build.outputs.version }}
         run: |
-          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('dist-dev/latest.json','utf8')).version")
-          gh release edit dev --title "Latest main build ($VERSION)" \
+          gh release edit dev --title "Latest main build ($DEV_VERSION)" \
             --notes "Rolling build of main @ ${{ github.sha }}.
 
-          Version \`$VERSION\` · installed apps offer this automatically via Update now."
+          Version \`$DEV_VERSION\` · installed apps offer this automatically via Update now."
