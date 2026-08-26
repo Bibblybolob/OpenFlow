@@ -64,12 +64,17 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
+            cargoArgs: "--target aarch64-apple-darwin"
+            tauriArgs: "--target aarch64-apple-darwin"
           - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
+            cargoArgs: "--target x86_64-apple-darwin"
+            tauriArgs: "--target x86_64-apple-darwin"
           - platform: windows-latest
             # NSIS only: WiX light.exe fails silently on current runners.
-            args: "--bundles nsis"
+            # cargo must NOT receive bundler flags (--bundles) — hence the
+            # separate tauriArgs below.
+            cargoArgs: ""
+            tauriArgs: "--bundles nsis"
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
@@ -102,7 +107,7 @@ jobs:
         run: node scripts/copy-engine.mjs ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
 
       - name: Build cleanup-engine helper
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml --features engine ${{ matrix.args }}
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --features engine ${{ matrix.cargoArgs }}
 
       - name: Stage real cleanup-engine for bundling
         run: node scripts/copy-engine.mjs ${{ contains(matrix.platform, 'macos') && 'aarch64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
@@ -129,4 +134,4 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.tauriArgs }}
