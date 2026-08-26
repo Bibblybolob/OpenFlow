@@ -246,7 +246,8 @@ jobs:
             [ -d "$d" ] || continue
             find "$d" \
               \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
-                 -o -name "*-setup.exe" -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
+                 -o -name "*-setup.exe" -o -name "*-setup.exe.sig" \
+                 -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
                  -o -name "latest.json" \) \
               -exec cp {} dist-dev/ \;
           done
