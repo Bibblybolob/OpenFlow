@@ -996,6 +996,39 @@ pub fn run() {
             download_local_llm,
             set_local_llm
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            // Closing (or minimizing) the Hub parks FlowClone in the tray —
+            // dictation, hotkeys and the flowbar stay alive in the
+            // background. Reopen via the tray menu (or the Dock on macOS);
+            // only the tray's Quit ends the app.
+            if window.label() == "hub" {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    // No cancelable minimize event exists; catch the
+                    // minimized state on resize and park it in the tray
+                    // instead of leaving a taskbar/dock button behind.
+                    tauri::WindowEvent::Resized(_) if window.is_minimized().unwrap_or(false) => {
+                        let _ = window.unminimize();
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            // Clicking the Dock icon on macOS reopens the Hub even when
+            // every window is hidden in the menu bar / tray.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                if let Some(window) = _app.get_webview_window("hub") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        });
 }
