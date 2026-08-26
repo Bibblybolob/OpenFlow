@@ -189,8 +189,11 @@ jobs:
           VER="${BASE_VERSION%.*}.$((${BASE_VERSION##*.} + 1))-dev.${GITHUB_RUN_NUMBER}"
           echo "DEV_VERSION=$VER" >> "$GITHUB_ENV"
           echo "stamp: $VER"
+          # GITHUB_ENV only applies to LATER steps — export for this shell.
+          export DEV_VERSION="$VER"
           node -e "
             const fs=require('fs'); const v=process.env.DEV_VERSION;
+            if (!/^\\d+\\.\\d+\\.\\d+-dev\\.\\d+$/.test(v)) throw new Error('bad stamp: '+v);
             for (const f of ['package.json','src-tauri/tauri.conf.json']) {
               const j=JSON.parse(fs.readFileSync(f,'utf8')); j.version=v;
               fs.writeFileSync(f, JSON.stringify(j,null,2)+'\n');
@@ -199,6 +202,9 @@ jobs:
             c=c.replace(/^version = \".*\"/m, 'version = \"'+v+'\"');
             fs.writeFileSync('src-tauri/Cargo.toml',c);
           "
+          # Fail loudly rather than shipping an 'undefined' stamp.
+          grep -q "version = \"$VER\"" src-tauri/Cargo.toml
+          [ "$(node -p "require('./package.json').version")" = "$VER" ]
 
       # tauri-build validates the externalBin entry whenever the crate
       # compiles, so stage the sidecar before building.
