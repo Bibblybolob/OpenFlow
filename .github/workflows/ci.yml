@@ -275,6 +275,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
+      # AFTER checkout (checkout would otherwise wipe dist-dev).
       - uses: actions/download-artifact@v4
         with:
           pattern: dev-*
