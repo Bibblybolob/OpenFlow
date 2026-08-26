@@ -287,8 +287,6 @@ jobs:
       - name: Show collected assets
         run: ls -la dist-dev/
 
-      - uses: actions/checkout@v4
-
       - name: Ensure rolling dev release exists
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
