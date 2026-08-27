@@ -8,18 +8,18 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 
 ## Features
 
-- **Push-to-talk dictation** — hold the hotkey (default `Right Shift`), speak, release. Text is transcribed, cleaned up by an LLM, and pasted at your cursor.
+- **Push-to-talk dictation** — hold the hotkey (default `Right Shift`), speak, release. Text is transcribed, cleaned up locally, and pasted at your cursor.
 - **Hands-free mode** — double-tap the hotkey to keep recording without holding; tap again or press Esc to finish.
 - **Pause & resume** — pause an active dictation from the pill and pick up mid-thought without ending the session.
 - **Microphone picker** — dictate through any input device (or the system default); the choice survives restarts.
 - **Start/stop chimes** — subtle synthesized audio feedback when a session opens and closes (toggleable).
-- **Silence intelligence** — leading/trailing silence is trimmed before upload (adaptive noise-floor threshold, mid-sentence pauses preserved), and hands-free sessions auto-stop after ~5 s of quiet so walking away never leaves a giant accidental transcript.
-- **AI cleanup** — GPT-4o-mini (OpenAI), Claude (Anthropic), or any model via OpenRouter rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), backtrack handling.
-- **Pluggable LLM providers** — bring an OpenAI, Claude, OpenRouter, or mix of keys; auto-detect or force a provider per your preference.
+- **Silence intelligence** — leading/trailing silence is trimmed before inference (adaptive noise-floor threshold, mid-sentence pauses preserved), and hands-free sessions auto-stop after ~5 s of quiet so walking away never leaves a giant accidental transcript.
+- **On-device transcription and cleanup** — Whisper.cpp (or optional Parakeet) transcribes locally, then the bundled llama.cpp cleanup engine rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), and backtrack handling.
+- **Offline model choices** — choose a Whisper model and optional cleanup model in Settings; downloads show progress, reject truncated files, and can be retried safely.
 - **Voice commands** — say "open youtube", "search rust async", or "copy …" to act instead of typing (toggleable).
 - **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct. Flow also **learns vocabulary on its own**: it diffs raw speech against the cleaned text, silently adopts recurring proper-noun fixes, and queues uncertain ones for one-click review on the Dictionary page.
 - **Cursor-context awareness** — dictation continues what you already wrote: cleanup sees the text before your caret and stitches itself in coherently.
-- **Streaming transcription** — cloud STT streams partial results into the pill during processing; you watch words appear rather than waiting blind.
+- **Local transcription** — the on-device engine keeps audio off the network; the flowbar shows recording levels and processing state while inference runs.
 - **Backtrack handling & emoji commands** — mid-sentence "wait / actually / never mind" corrections collapse to your final intent, and spoken emoji requests ("insert party emoji") render the real thing.
 - **Per-app languages** — pin a transcription language to an app rule (e.g. Spanish in WhatsApp); it overrides the global setting for that app only.
 - **Quick style override** — right-click the pill to force a tone for this session (or back to per-app matching), without touching Settings.
@@ -27,14 +27,14 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 - **Per-app styles** — tone instructions matched against the frontmost app's bundle identifier (e.g., formal in Mail, casual in Slack).
 - **Flow Bar** — floating, focus-safe pill with an always-on live waveform (real mic levels, independent of the animations setting) plus a "mic silent?" alert when the capture stream hears nothing for 2s. Levels are pulled by the pill on a timer rather than pushed via events, so WebKit's throttling of overlay windows can never freeze the indicator — so you always know whether the pill is actually listening; click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
 - **Menu-bar tray** — status tooltip plus Start/Stop, Cancel, Open Hub, and Quit from any app, even while the pill is hidden.
-- **History with actions** — searchable transcript history grouped by day with word counts and streaks; every row can be copied or re-pasted at the cursor in the focused app.
+- **History with actions** — searchable transcript history grouped by day with word counts and streaks; older pages can be loaded on demand, and every row can be starred, copied, or re-pasted at the cursor in the focused app.
 - **Scratch that** — say "scratch that", double-tap Esc, or retry failed transcriptions from the pill; undo works on re-pasted history too.
 - **Multi-language** — 19 languages plus auto-detect for transcription.
 - **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (default **Right Shift**: under both palms, never types a character, and never intercepted by macOS features the way F5 is); applies live and migrates stale key names on upgrade.
 - **Self-healing hotkey watcher** — if Input Monitoring is revoked (e.g. after replacing the app bundle), the watcher reports its state to the Hub ("waiting for permission / active / unavailable") and recovers automatically once the permission returns; microphone failures surface on the pill instead of silently doing nothing.
 - **Reliable Flow Bar visibility** — the pill is shown natively by the Rust core on every state change (not just via webview events), its position is clamped to the visible monitor, and the webview reconciles against the pipeline state as a fallback — so dictation always has a visible indicator.
-- **Guided onboarding** — first-launch wizard walks through Accessibility + microphone permissions with live checks, then a real dictation test unlocks the app.
-- **Privacy-first storage** — everything local in SQLite; audio is transient; keys stay on-device.
+- **Guided onboarding** — first-launch wizard walks through permissions, downloads a usable transcription model with live progress, then runs a real dictation test before unlocking the app.
+- **Privacy-first storage** — everything local in SQLite; audio is transient; model inference and cleanup stay on-device. The only network access is the model download you request.
 
 ## Architecture
 
@@ -48,9 +48,9 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 │ hotkey.rs    global push-to-talk watcher (tap vs hold detection) │
 │ audio.rs     cpal mic capture → 16-bit WAV + RMS level events    │
 │ pipeline.rs  FSM: idle → recording → transcribing → injecting    │
-│ cloud/stt.rs OpenAI transcription (gpt-4o-transcribe) or          │
-│              OpenRouter audio-input chat models                   │
-│ cloud/llm.rs Cleanup pass — OpenAI Chat / Anthropic Messages     │
+│ cloud/local_stt.rs Whisper.cpp / optional Parakeet inference     │
+│ cloud/local_llm.rs local cleanup via the cleanup-engine sidecar  │
+│ cloud/llm.rs Shared cleanup prompt + style construction          │
 │ commands.rs  Voice command parser + executor                     │
 │ inject/      Clipboard-paste: System Events (macOS), SendInput    │
 │              Ctrl+V (Windows)                                    │
@@ -62,21 +62,19 @@ Built with **Tauri 2** (Rust core + React/TypeScript UI).
 
 1. Hotkey down → frontmost app captured for style matching, mic stream opens.
 2. Hotkey up → audio is resampled to 16 kHz mono and encoded as WAV in memory.
-3. Transcription: OpenAI STT (gpt-4o-mini-transcribe by default — ~2x faster
-   than the full model at near-identical quality) **streams server-sent
-   events**, so words render live in the pill while the request is still in
-   flight; OpenRouter audio models and on-device whisper.cpp emit their text
-   in one piece (dictionary terms injected as a bias prompt). Connections are
-   pre-warmed at launch and stay warm between sessions, so no TLS handshake
-   is paid per dictation.
+3. Transcription runs locally through the selected Whisper or Parakeet model
+   (dictionary terms and recent transcript context are used as a bias prompt).
+   Local inference emits the completed text in one piece, so audio never
+   leaves the device.
 4. Snippet fast-path: exact trigger match expands locally, no LLM call.
-5. LLM cleanup polishes the text (skippable via Settings → Cleanup; short
-   utterances under ~120 chars skip it automatically via "Fast path", and raw
-   text is always the fallback if cleanup fails — you never lose a dictation).
+5. Local LLM cleanup polishes the text (skippable via Settings → Cleanup;
+   short utterances under ~120 chars skip it automatically via "Fast path";
+   raw text is always the fallback if cleanup fails — you never lose a
+   dictation).
 5b. Cursor context: while recording, the ~400 characters before your caret
-   are read in the background (macOS Accessibility); cleanup uses them to make
-   dictation *continue* the surrounding sentence coherently instead of landing
-   as an isolated fragment.
+   are read in the background through macOS Accessibility or Windows UI
+   Automation when the focused control exposes a text pattern. Cleanup uses
+   them to continue the surrounding sentence coherently.
 6. Command mode check: recognized commands execute instead of pasting.
 7. Text is staged on the clipboard, Cmd+V synthesized natively via CGEvent
    (macOS) or SendInput Ctrl+V (Windows) into the target app, clipboard
@@ -101,7 +99,8 @@ First run:
 1. Grant **Accessibility** permission when prompted (Settings → Privacy & Security → Accessibility) — required for paste injection and app detection.
 2. Grant **Input Monitoring** permission (Settings → Privacy & Security → Input Monitoring) — required for the global hotkey watcher. The Hub shows live status for both and can open the right pane.
 3. Grant **Microphone** access on first dictation.
-4. Add an API key in **Settings → API keys** (OpenAI for transcription; OpenAI, Claude, or OpenRouter for cleanup). Env vars `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` also work.
+4. In the onboarding model step, download at least one transcription model.
+   Cleanup models can be downloaded later from Settings → Cleanup.
 
 Then hold `Right Shift` anywhere and talk.
 
@@ -110,7 +109,7 @@ Then hold `Right Shift` anywhere and talk.
 ### Platform notes
 
 - **macOS** — requires Accessibility permission (paste injection, frontmost-app detection), Input Monitoring permission (global hotkey), and Microphone permission. Paste is performed by staging the clipboard and synthesizing Cmd+V via System Events; the clipboard is restored ~800 ms later. Hotkey detection uses a polling watcher gated on both permissions; it starts automatically once they are granted.
-- **Windows** — no permission prompts needed. Paste uses SendInput to synthesize Ctrl+V with the same clipboard save/restore dance. Known limitation: injection cannot reach apps running elevated (as administrator) unless FlowClone is elevated too. Frontmost-app detection returns the process name (e.g. `chrome`), which per-app styles match against.
+- **Windows** — no permission prompts needed. Paste uses SendInput to synthesize Ctrl+V with the same clipboard save/restore dance. UI Automation supplies caret context in text controls that expose `TextPattern`; unsupported controls simply run cleanup without context. Known limitation: injection cannot reach apps running elevated (as administrator) unless FlowClone is elevated too. Frontmost-app detection returns the process name (e.g. `chrome`), which per-app styles match against.
 
 ### Production build & releases
 
@@ -171,7 +170,7 @@ Unsigned installers trigger "Windows protected your PC". Click **More info → R
 | 5 | Hands-free, hotkey customization, languages, autostart | ✅ |
 | 6 | Voice commands, error auto-dismiss polish | ✅ |
 | 7 | Windows port (SendInput injection, frontmost app) | ✅ |
-| 8 | Onboarding wizard + permission gates | ✅ |
+| 8 | Onboarding wizard + permission gates + model setup | ✅ |
 | 9 | Packaging, updater, signing pipeline | ✅ |
 
 ## License
