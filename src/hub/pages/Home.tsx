@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/ipc";
 import type { Stats, Transcript } from "../../lib/types";
@@ -19,6 +19,25 @@ function StatCard({ label, value }: { label: string; value: string }) {
       <div className="mt-1 text-2xl font-semibold text-white">{value}</div>
     </div>
   );
+}
+
+function dayKey(createdAt: string): string {
+  return new Date(createdAt).toDateString();
+}
+
+function dayLabel(createdAt: string): string {
+  const date = new Date(createdAt);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (dayKey(createdAt) === today.toDateString()) return "Today";
+  if (dayKey(createdAt) === yesterday.toDateString()) return "Yesterday";
+  return date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    year: date.getFullYear() === today.getFullYear() ? undefined : "numeric",
+  });
 }
 
 export default function Home() {
@@ -105,6 +124,17 @@ export default function Home() {
     await navigator.clipboard.writeText(text);
   }
 
+  async function onFlag(id: number, flagged: boolean) {
+    await api.setFlagged(id, !flagged);
+    setTranscripts((current) =>
+      current.map((transcript) =>
+        transcript.id === id
+          ? { ...transcript, flagged: !flagged }
+          : transcript,
+      ),
+    );
+  }
+
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
       {!watcherReady && (
@@ -175,47 +205,68 @@ export default function Home() {
             here.
           </p>
         )}
-        {transcripts.map((t) => (
-          <div
-            key={t.id}
-            className="group flex items-start justify-between gap-4 rounded-xl border border-white/5 bg-white/[0.03] px-4 py-3"
-          >
-            <div className="min-w-0">
-              <p className="truncate text-sm text-neutral-200">{t.text}</p>
-              <p className="mt-1 text-xs text-neutral-600">
-                {new Date(t.createdAt).toLocaleString()} · {t.wordCount} words ·{" "}
-                {t.targetApp || "unknown app"}
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100">
-              <button
-                onClick={() => onCopy(t.text)}
-                className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
-              >
-                Copy
-              </button>
-              <button
-                onClick={async () => {
-                  try {
-                    await api.pasteText(t.text);
-                  } catch (e) {
-                    console.error(e);
-                  }
-                }}
-                title="Paste this transcript at your cursor in the focused app"
-                className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
-              >
-                Re-paste
-              </button>
-              <button
-                onClick={() => onDelete(t.id)}
-                className="rounded-md px-2 py-1 text-xs text-neutral-500 transition hover:bg-red-500/10 hover:text-red-400"
-              >
-                Delete
-              </button>
-            </div>
-          </div>
-        ))}
+        {transcripts.map((t, index) => {
+          const showDay = index === 0 || dayKey(t.createdAt) !== dayKey(transcripts[index - 1].createdAt);
+          return (
+            <Fragment key={t.id}>
+              {showDay && (
+                <h2 className="pt-2 text-xs font-medium tracking-wider text-neutral-500 uppercase">
+                  {dayLabel(t.createdAt)}
+                </h2>
+              )}
+              <div className="group flex items-start justify-between gap-4 rounded-xl border border-white/5 bg-white/[0.03] px-4 py-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm text-neutral-200">{t.text}</p>
+                  <p className="mt-1 text-xs text-neutral-600">
+                    {new Date(t.createdAt).toLocaleString()} · {t.wordCount} words ·{" "}
+                    {t.targetApp || "unknown app"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+                  <button
+                    type="button"
+                    onClick={() => onFlag(t.id, t.flagged)}
+                    aria-label={t.flagged ? "Unpin transcript" : "Pin transcript"}
+                    title={t.flagged ? "Unpin transcript" : "Pin transcript"}
+                    className={`rounded-md px-2 py-1 text-sm transition hover:bg-white/5 ${
+                      t.flagged ? "text-amber-400" : "text-neutral-600 hover:text-neutral-300"
+                    }`}
+                  >
+                    ★
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onCopy(t.text)}
+                    className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
+                  >
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.pasteText(t.text);
+                      } catch (e) {
+                        console.error(e);
+                      }
+                    }}
+                    title="Paste this transcript at your cursor in the focused app"
+                    className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
+                  >
+                    Re-paste
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(t.id)}
+                    className="rounded-md px-2 py-1 text-xs text-neutral-500 transition hover:bg-red-500/10 hover:text-red-400"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </Fragment>
+          );
+        })}
         {hasMore && !query.trim() && (
           <button
             type="button"
