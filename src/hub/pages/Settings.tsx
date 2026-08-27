@@ -44,6 +44,7 @@ export default function Settings({
   const [flowbarPreset, setFlowbarPreset] = useState("bottom_center");
   const [pillStyle, setPillStyle] = useState<PillStyle>(DEFAULT_PILL_STYLE);
   const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
+  const [localModelsLoaded, setLocalModelsLoaded] = useState(false);
   const [localModel, setLocalModel] = useState("base");
   const [localDownload, setLocalDownload] = useState<string | null>(null);
   const [localDownloadError, setLocalDownloadError] =
@@ -64,6 +65,7 @@ export default function Settings({
   const [cleanupEnabled, setCleanupEnabled] = useState(true);
   const [skipShort, setSkipShort] = useState(true);
   const [localLlms, setLocalLlms] = useState<LocalModelInfo[]>([]);
+  const [localLlmsLoaded, setLocalLlmsLoaded] = useState(false);
   const [localLlm, setLocalLlm] = useState("qwen3-4b");
   const [llmDownload, setLlmDownload] = useState<string | null>(null);
   const [llmDownloadError, setLlmDownloadError] =
@@ -82,6 +84,7 @@ export default function Settings({
   const [hotkeyMode, setHotkeyMode] = useState("toggle");
   const [autostart, setAutostart] = useState(false);
   const [commandMode, setCommandMode] = useState(true);
+  const [microphone, setMicrophone] = useState<boolean | null>(null);
   const [accessibility, setAccessibility] = useState<boolean | null>(null);
   const [inputMonitoring, setInputMonitoring] = useState<boolean | null>(null);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
@@ -110,7 +113,7 @@ export default function Settings({
 
 
   useEffect(() => {
-    refresh();
+    refresh().catch((error) => console.error("settings refresh failed", error));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -178,7 +181,7 @@ export default function Settings({
       "hotkey-status",
       (event) => {
         setWatcherStatus(event.payload.status);
-        refresh();
+        refresh().catch((error) => console.error("settings refresh failed", error));
       },
     );
     return () => {
@@ -220,7 +223,9 @@ export default function Settings({
     const llms = await api.localLlmStatus().catch(() => [] as LocalModelInfo[]);
     const style = await loadPillStyle();
 
-    setLanguage(lang ?? "auto");
+    // Auto is persisted as an empty string so the backend can pass no
+    // language hint to Whisper. Normalize it back to the visible option.
+    setLanguage(lang || "auto");
     setFlowbarPreset(preset ?? "bottom_center");
     setHotkey(hk.length ? hk : ["Right Shift"]);
     setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "CapsLock", "Right Shift"]);
@@ -236,12 +241,21 @@ export default function Settings({
     setCleanupEnabled(ce ?? true);
     setSkipShort(ss ?? true);
     setLocalEngine(le === "parakeet" ? "parakeet" : "whisper");
-    setLocalModel(lm ?? "base");
+    setLocalModel(
+      lms.some((model) => model.id === lm) ? (lm as string) : (lms[0]?.id ?? "base"),
+    );
     setLocalModels(lms);
+    setLocalModelsLoaded(true);
     setParakeetStatus(ps);
-    setLocalLlm(llmId ?? "qwen3-4b");
+    setLocalLlm(
+      llms.some((model) => model.id === llmId)
+        ? (llmId as string)
+        : (llms[0]?.id ?? "qwen3-4b"),
+    );
     setLocalLlms(llms);
+    setLocalLlmsLoaded(true);
     setPillStyle(style);
+    setMicrophone(await api.checkMicPermission().catch(() => false));
     setAccessibility(await invokeAccessibility());
     setInputMonitoring(await api.inputMonitoringStatus().catch(() => false));
   }
@@ -277,6 +291,7 @@ export default function Settings({
   }, []);
 
   async function changeLocalLlm(id: string) {
+    if (llmDownload !== null) return;
     setLocalLlm(id);
     try {
       await api.setLocalLlm(id);
@@ -321,6 +336,7 @@ export default function Settings({
   }
 
   async function changeLocalModel(id: string) {
+    if (localDownload !== null) return;
     setLocalModel(id);
     try {
       await api.setLocalModel(id);
@@ -360,16 +376,18 @@ export default function Settings({
     }
   }
 
-  async function downloadParakeet() {
-    if (parakeetDownload !== null || !parakeetStatus.available) return;
+  async function downloadParakeet(): Promise<boolean> {
+    if (parakeetDownload !== null || !parakeetStatus.available) return false;
     setParakeetDownloadError(null);
     setParakeetDownload("starting…");
     try {
       await api.downloadLocalParakeet();
+      return true;
     } catch (e) {
       console.error(e);
       setParakeetDownload(null);
       setParakeetDownloadError(readableError(e));
+      return false;
     }
   }
 
@@ -377,7 +395,8 @@ export default function Settings({
     if (engine === "parakeet" && !parakeetStatus.available) return;
     try {
       if (engine === "parakeet" && !parakeetStatus.downloaded) {
-        await downloadParakeet();
+        const downloaded = await downloadParakeet();
+        if (!downloaded) return;
       }
       await api.setSetting("sttLocalEngine", engine);
       setLocalEngine(engine);
@@ -478,9 +497,9 @@ export default function Settings({
       const version = await api.checkForUpdate();
       if (version) {
         setAvailableVersion(version);
-        setUpdateStatus(`Version ${version} available — installing…`);
-        await api.installUpdate();
-        setUpdateStatus("Installed. Restarting…");
+        // Checking must not install without a second, explicit click. Clearing
+        // the transient status reveals the existing "Update now" action.
+        setUpdateStatus(null);
       } else {
         setAvailableVersion(null);
         setUpdateStatus("You're up to date.");
@@ -630,8 +649,9 @@ export default function Settings({
           onChange={toggleCommandMode}
         />
         <p className="text-xs text-neutral-600">
-          Hold the hotkey to dictate. Quick double-tap switches to hands-free
-          mode; tap again or press Esc to stop.
+          {hotkeyMode === "toggle"
+            ? "Press the hotkey once to start dictating and again to stop. Press Esc to cancel."
+            : "Hold the hotkey to dictate. Quick double-tap switches to hands-free mode; tap again or press Esc to stop."}
         </p>
       </section>
 
@@ -673,6 +693,22 @@ export default function Settings({
         </div>
         {localEngine === "whisper" ? (
           <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+            {localModelsLoaded && localModels.length === 0 && (
+              <div className="flex items-center justify-between gap-3 text-xs text-amber-300">
+                <span>Transcription models could not be loaded.</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    refresh().catch((error) =>
+                      console.error("settings refresh failed", error),
+                    )
+                  }
+                  className="shrink-0 underline underline-offset-2 hover:text-white"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {localModels.map((m) => (
               <div key={m.id} className="flex flex-col gap-2">
                 <div className="flex items-center justify-between gap-4">
@@ -682,6 +718,7 @@ export default function Settings({
                       name="localModel"
                       checked={localModel === m.id}
                       onChange={() => changeLocalModel(m.id)}
+                      disabled={localDownload !== null}
                       className="accent-indigo-400"
                     />
                     <span className="text-neutral-300">{m.label}</span>
@@ -923,6 +960,11 @@ export default function Settings({
               cleanupEnabled ? "" : "pointer-events-none opacity-40"
             }`}
           >
+            {localLlmsLoaded && localLlms.length === 0 && (
+              <p className="text-xs text-amber-300">
+                Cleanup models could not be loaded. Reopen Settings to retry.
+              </p>
+            )}
             {localLlms.map((m) => (
               <div key={m.id} className="flex flex-col gap-2">
                 <div className="flex items-center justify-between gap-4">
@@ -932,6 +974,7 @@ export default function Settings({
                       name="localLlm"
                       checked={localLlm === m.id}
                       onChange={() => changeLocalLlm(m.id)}
+                      disabled={llmDownload !== null}
                       className="accent-indigo-400"
                     />
                     <span className="text-neutral-300">{m.label}</span>
@@ -993,7 +1036,15 @@ export default function Settings({
         <div className="overflow-hidden rounded-xl border border-white/5">
           <WatcherRow status={watcherStatus} />
           <KeySightRow />
-          <PermRow label="Microphone" ok={true} hint="Granted on first use" />
+          <PermRow
+            label="Microphone"
+            ok={microphone === true}
+            hint={
+              microphone === false
+                ? "No working input device is available, or microphone access was denied"
+                : "Captures audio only while dictation is active"
+            }
+          />
           <PermRow
             label="Input Monitoring (global hotkey)"
             ok={inputMonitoring === true}
@@ -1165,6 +1216,10 @@ function WatcherRow({ status }: { status: string }) {
           : prefix === "waiting-permissions"
             ? "Hotkey backend — waiting for permissions"
             : "Hotkey backend unavailable";
+  const canOpenSettings =
+    prefix === "waiting-accessibility" ||
+    prefix === "waiting-input-monitoring" ||
+    prefix === "waiting-permissions";
   const openRelevant = () =>
     (prefix === "waiting-accessibility"
       ? api.openAccessibilitySettings()
@@ -1182,7 +1237,7 @@ function WatcherRow({ status }: { status: string }) {
         )}
       </div>
       <div className="flex items-center gap-2">
-        {!ok && (
+        {!ok && canOpenSettings && (
           <button
             onClick={openRelevant}
             className="rounded-md bg-indigo-500/20 px-2 py-1 text-xs text-indigo-300 transition hover:bg-indigo-500/30"

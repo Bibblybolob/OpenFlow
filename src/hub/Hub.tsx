@@ -10,7 +10,7 @@ import { api } from "../lib/ipc";
 import { usePipelineState } from "./usePipelineState";
 
 const LABELS: Record<string, string> = {
-  idle: "Ready · hold hotkey to talk",
+  idle: "Ready · use hotkey to talk",
   recording: "Recording…",
   transcribing: "Transcribing…",
   injecting: "Pasting…",

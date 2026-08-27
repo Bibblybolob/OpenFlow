@@ -7,6 +7,6 @@
 	<key>CFBundleName</key>
 	<string>FlowClone</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>FlowClone transcribes your speech when you hold the dictation hotkey.</string>
+	<string>FlowClone transcribes your speech while dictation is active.</string>
 </dict>
 </plist>

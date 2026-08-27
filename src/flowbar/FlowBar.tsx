@@ -29,8 +29,8 @@ const STATE_POLL_MS = 300;
 // "the pill is broken".
 const SILENCE_ALERT_MS = 2000;
 const SAMPLE_INTERVAL_MS = 40;
-// Breathing room the Rust side adds around our reported content size
-// (glow ring). Must mirror FLOWBAR_FIT_PAD in src-tauri/src/lib.rs.
+// Breathing room the Rust side adds around our reported content size. The
+// pill is inset by the same amount so its glow stays inside the OS window.
 const GLOW_PAD = 18;
 const FIT_DEBOUNCE_MS = 80;
 
@@ -57,6 +57,7 @@ export default function FlowBar() {
   const [errorText, setErrorText] = useState<string | null>(null);
   const [hasWarning, setHasWarning] = useState(false);
   const [warningText, setWarningText] = useState<string | null>(null);
+  const [warningSerial, setWarningSerial] = useState(0);
   const [wave, setWave] = useState<number[]>(() =>
     new Array(WAVE_BARS).fill(0),
   );
@@ -95,7 +96,6 @@ export default function FlowBar() {
   function measureFit(): { w: number; h: number } | null {
     const root = stageRef.current;
     if (!root) return null;
-    const pad = GLOW_PAD * 2;
     let left = 0,
       top = 0,
       right = 0,
@@ -122,8 +122,10 @@ export default function FlowBar() {
     }
     if (!any) return null;
     return {
-      w: Math.ceil(right - left + pad),
-      h: Math.ceil(bottom - top + pad),
+      // Report content only. flowbar_fit adds GLOW_PAD on both sides; adding
+      // it here as well produced a large invisible click-blocking rectangle.
+      w: Math.ceil(right - left),
+      h: Math.ceil(bottom - top),
     };
   }
 
@@ -167,10 +169,6 @@ export default function FlowBar() {
     const rootEl = document.getElementById("root");
     if (rootEl) rootEl.style.background = "transparent";
 
-    let unlistenPipeline: (() => void) | undefined;
-    let unlistenWarning: (() => void) | undefined;
-    let unlistenStyle: (() => void) | undefined;
-    let unlistenPartial: (() => void) | undefined;
     let pollId: ReturnType<typeof setInterval> | undefined;
 
     const applyState = (next: State) => {
@@ -187,24 +185,25 @@ export default function FlowBar() {
       setState(next);
     };
 
-    listen<PipelineEvent>("pipeline", (e) => {
+    const unlistenPipeline = listen<PipelineEvent>("pipeline", (e) => {
       applyState(e.payload.type);
       setHasError(Boolean(e.payload.error));
       setErrorText(e.payload.error ?? null);
-    }).then((fn) => (unlistenPipeline = fn));
+    });
 
-    listen<{ message: string }>("pipeline-warning", (e) => {
+    const unlistenWarning = listen<{ message: string }>("pipeline-warning", (e) => {
       setWarningText(e.payload.message);
       setHasWarning(true);
-    }).then((fn) => (unlistenWarning = fn));
+      setWarningSerial((serial) => serial + 1);
+    });
 
-    listen<{ text: string }>("stt-partial", (e) => {
+    const unlistenPartial = listen<{ text: string }>("stt-partial", (e) => {
       setPartial(e.payload.text);
-    }).then((fn) => (unlistenPartial = fn));
+    });
 
-    listen("flowbar-style-changed", () => {
-      loadPillStyle().then(setStyle);
-    }).then((fn) => (unlistenStyle = fn));
+    const unlistenStyle = listen("flowbar-style-changed", () => {
+      loadPillStyle().then(setStyle).catch(() => {});
+    });
 
     // Safety net: events can be missed while this hidden window is still
     // loading (or if its webview throttles listeners), so periodically
@@ -221,7 +220,7 @@ export default function FlowBar() {
     const unMoved = win.onMoved(({ payload }) => {
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
-        api.setSetting("flowBarPos", [payload.x, payload.y]);
+        api.setSetting("flowBarPos", [payload.x, payload.y]).catch(() => {});
       }, 400);
     });
 
@@ -256,11 +255,11 @@ export default function FlowBar() {
     return () => {
       clearInterval(pollId);
       clearTimeout(hideTimer.current);
-      unlistenPipeline?.();
-      unlistenWarning?.();
-      unlistenStyle?.();
-      unlistenPartial?.();
-      unMoved.then((fn) => fn());
+      unlistenPipeline.then((fn) => fn()).catch(() => {});
+      unlistenWarning.then((fn) => fn()).catch(() => {});
+      unlistenStyle.then((fn) => fn()).catch(() => {});
+      unlistenPartial.then((fn) => fn()).catch(() => {});
+      unMoved.then((fn) => fn()).catch(() => {});
     };
   }, []);
 
@@ -274,7 +273,7 @@ export default function FlowBar() {
     if (!hasWarning) return;
     const timer = setTimeout(() => setHasWarning(false), 8000);
     return () => clearTimeout(timer);
-  }, [hasWarning]);
+  }, [hasWarning, warningSerial]);
 
   const recording = state === "recording";
   const paused = state === "paused";
@@ -364,11 +363,14 @@ export default function FlowBar() {
         api.getSetting<number | "none">("styleOverride"),
       ]);
       setStyles(list.filter((st) => st.enabled));
-      setStyleOverride(current ?? null);
+      const normalized = current === -1 ? "none" : (current ?? null);
+      setStyleOverride(normalized);
       setOverrideLabel(
-        current != null
-          ? (list.find((st) => st.id === current)?.label ?? "Custom")
-          : null,
+        normalized === "none"
+          ? "No style"
+          : typeof normalized === "number"
+            ? (list.find((st) => st.id === normalized)?.label ?? "Custom")
+            : null,
       );
       setStyleMenuOpen(true);
     } catch {
@@ -379,7 +381,11 @@ export default function FlowBar() {
   async function pickStyle(id: number | null | "none") {
     setStyleOverride(id);
     setOverrideLabel(
-      id != null ? (styles.find((st) => st.id === id)?.label ?? null) : null,
+      id === "none"
+        ? "No style"
+        : typeof id === "number"
+          ? (styles.find((st) => st.id === id)?.label ?? null)
+          : null,
     );
     setStyleMenuOpen(false);
     try {
@@ -453,13 +459,13 @@ export default function FlowBar() {
         {styleMenuOpen && (
           <div
             data-style-menu
-            className="absolute bottom-full left-1/2 z-10 mb-2 w-48 -translate-x-1/2 rounded-xl border border-white/10 bg-[#17171c]/95 p-1 shadow-2xl"
+            className="absolute top-full left-0 z-10 mt-2 w-48 rounded-xl border border-white/10 bg-[#17171c]/95 p-1 shadow-2xl"
           >
             {(
               [
                 [null, "Auto (match app)"],
-                [-1, "No style"],
-              ] as [number | null, string][]
+                ["none", "No style"],
+              ] as [number | null | "none", string][]
             ).map(([id, label]) => (
               <button
                 key={label}
@@ -468,7 +474,7 @@ export default function FlowBar() {
               >
                 {label}
                 {(id === null && styleOverride === null) ||
-                (id === -1 && false) ? (
+                (id === "none" && styleOverride === "none") ? (
                   <span className="text-indigo-400">✓</span>
                 ) : null}
               </button>

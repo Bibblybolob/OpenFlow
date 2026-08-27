@@ -12,7 +12,7 @@ mod sound;
 mod store;
 
 use std::fs;
-use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::Value;
@@ -40,9 +40,16 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
 
 pub(crate) const FLOWBAR_SIZE: (f64, f64) = (240.0, 52.0);
 
-/// Text most recently injected into an app, kept so "scratch that" can undo
-/// it and so re-pasted history entries are equally undoable.
-pub(crate) static LAST_PASTED: Mutex<Option<String>> = Mutex::new(None);
+/// Location and time of the most recent injection. Scratch is only safe while
+/// that same app is still focused and the paste is recent; otherwise Ctrl/Cmd
+/// +Z could undo an unrelated action in a different application.
+struct LastPaste {
+    target_app: String,
+    pasted_at: std::time::Instant,
+}
+
+static LAST_PASTED: Mutex<Option<LastPaste>> = Mutex::new(None);
+const SCRATCH_MAX_AGE_SECS: u64 = 30;
 
 /// A transcription whose STT stage failed, kept around so it can be retried
 /// without re-recording.
@@ -68,19 +75,26 @@ pub(crate) fn clear_retry_job() {
 /// Text captured from before the caret while a session records; taken by
 /// the processing worker when the recording ends.
 pub(crate) static CARET_CONTEXT: Mutex<Option<String>> = Mutex::new(None);
+static CARET_CONTEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn begin_context_capture() {
+    let generation = CARET_CONTEXT_GENERATION.fetch_add(1, AtomicOrdering::Relaxed) + 1;
     if let Ok(mut slot) = CARET_CONTEXT.lock() {
         *slot = None;
     }
     // Runs concurrently with recording: reading AX can take 50-150ms and
     // must not sit on the hotkey path. Focus cannot change meanwhile —
     // the pill window is not focusable.
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         let ctx = inject::preceding_context();
         if !ctx.is_empty() {
             if let Ok(mut slot) = CARET_CONTEXT.lock() {
-                *slot = Some(ctx);
+                // A rapid cancel/restart can leave an older AX/UIA read in
+                // flight. Never let that old result overwrite the context for
+                // the newer dictation.
+                if CARET_CONTEXT_GENERATION.load(AtomicOrdering::Relaxed) == generation {
+                    *slot = Some(ctx);
+                }
             }
         }
     });
@@ -90,9 +104,12 @@ pub(crate) fn take_caret_context() -> Option<String> {
     CARET_CONTEXT.lock().ok().and_then(|mut slot| slot.take())
 }
 
-pub(crate) fn remember_pasted(text: &str) {
+pub(crate) fn remember_pasted(target_app: &str) {
     if let Ok(mut slot) = LAST_PASTED.lock() {
-        *slot = Some(text.to_string());
+        *slot = Some(LastPaste {
+            target_app: target_app.to_string(),
+            pasted_at: std::time::Instant::now(),
+        });
     }
 }
 
@@ -101,8 +118,23 @@ pub(crate) fn scratch_last() -> Result<(), String> {
     let mut slot = LAST_PASTED
         .lock()
         .map_err(|_| "lock poisoned".to_string())?;
-    if slot.is_none() {
+    let Some(last) = slot.as_ref() else {
         return Err("nothing recent to remove".to_string());
+    };
+    if last.pasted_at.elapsed() > std::time::Duration::from_secs(SCRATCH_MAX_AGE_SECS) {
+        *slot = None;
+        return Err("the last dictation is too old to remove safely".to_string());
+    }
+    let current_app = inject::frontmost_app();
+    if last.target_app.is_empty() || !current_app.eq_ignore_ascii_case(&last.target_app) {
+        return Err(format!(
+            "switch back to {} before removing the last dictation",
+            if last.target_app.is_empty() {
+                "the original app"
+            } else {
+                &last.target_app
+            }
+        ));
     }
     let result = inject::undo_paste();
     if result.is_ok() {
@@ -126,7 +158,7 @@ pub(crate) fn update_tray(app: &tauri::AppHandle, next: pipeline::PipelineState)
     };
     let label = match next {
         pipeline::PipelineState::Idle => "Start dictation",
-        pipeline::PipelineState::Recording => "Stop dictation",
+        pipeline::PipelineState::Recording | pipeline::PipelineState::Paused => "Stop dictation",
         _ => "Working…",
     };
     let _ = tray_menu.toggle.set_text(label);
@@ -386,12 +418,18 @@ fn cancel_recording(state: tauri::State<AppState>) {
     state.pipeline.cancel();
 }
 
-/// Re-pastes an arbitrary text (history rows) at the cursor. Also recorded
-/// as the last paste so scratch-that covers it.
+/// Re-pastes a history row into the app it originally came from. The Hub is
+/// necessarily focused when its button is clicked, so transfer focus before
+/// injecting or the text would be pasted back into FlowClone itself.
 #[tauri::command]
-fn paste_text_at_cursor(_state: tauri::State<AppState>, text: String) -> Result<(), String> {
+fn paste_text_at_cursor(
+    _state: tauri::State<AppState>,
+    text: String,
+    target_app: String,
+) -> Result<(), String> {
+    inject::focus_app(&target_app)?;
     inject::paste_text(&text)?;
-    remember_pasted(&text);
+    remember_pasted(&target_app);
     Ok(())
 }
 
@@ -491,7 +529,12 @@ fn autostart_set(app: tauri::AppHandle, enable: bool) -> store::Result<()> {
 }
 
 #[tauri::command]
-fn check_mic_permission() -> store::Result<bool> {
+fn check_mic_permission(state: tauri::State<AppState>) -> store::Result<bool> {
+    // A live recording is stronger evidence than opening a competing probe
+    // stream (which can fail on exclusive-mode Windows devices).
+    if state.pipeline.current() != pipeline::PipelineState::Idle {
+        return Ok(true);
+    }
     let mut probe = audio::AudioEngine::new();
     match probe.probe() {
         Ok(()) => Ok(true),
@@ -578,6 +621,14 @@ fn download_local_model(app: tauri::AppHandle, model: String) -> Result<(), Stri
 
 #[tauri::command]
 fn set_local_model(state: tauri::State<AppState>, model: String) -> store::Result<()> {
+    if !cloud::local_stt::LOCAL_MODELS
+        .iter()
+        .any(|entry| entry.id == model.as_str())
+    {
+        return Err(store::StoreError::Other(format!(
+            "unknown local model: {model}"
+        )));
+    }
     with_db(&state, |db| {
         db.set_setting("sttLocalModel", &serde_json::json!(model))
     })
@@ -621,6 +672,11 @@ fn download_local_llm(app: tauri::AppHandle, model: String) -> Result<(), String
 
 #[tauri::command]
 fn set_local_llm(state: tauri::State<AppState>, model: String) -> store::Result<()> {
+    if cloud::local_llm::catalog_llm(&model).is_none() {
+        return Err(store::StoreError::Other(format!(
+            "unknown local LLM: {model}"
+        )));
+    }
     with_db(&state, |db| {
         db.set_setting("llmLocalModel", &serde_json::json!(model))
     })

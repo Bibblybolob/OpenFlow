@@ -146,8 +146,9 @@ impl fmt::Display for PipelineState {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineEvent {
+    #[serde(rename = "type")]
     state: PipelineState,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -157,6 +158,9 @@ pub struct PipelineEvent {
 
 enum Msg {
     Hotkey(HotkeyEvent),
+    /// UI/tray stop action. Unlike a physical key release, this must stop in
+    /// both toggle and push-to-talk activation modes.
+    Stop,
     Cancel,
     PauseToggle,
     Retry {
@@ -170,7 +174,20 @@ enum Msg {
     /// Sent TAP_JUDGE_WAIT_MS after a quick release that kept the session
     /// alive for double-tap detection; if no second tap arrived by then,
     /// the session ends like a normal release would.
-    TapJudge,
+    TapJudge {
+        generation: u64,
+    },
+    /// Stops an active recording from a watchdog or the hard session limit.
+    /// Generation tagging prevents an old timer from stopping a later session.
+    AutoStop {
+        generation: u64,
+    },
+}
+
+#[derive(Clone)]
+struct WorkerFlags {
+    busy: Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct Pipeline {
@@ -191,6 +208,11 @@ impl Pipeline {
         let (tx, rx) = mpsc::channel::<Msg>();
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
         let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_flags = WorkerFlags {
+            busy: Arc::clone(&busy),
+            cancelled: worker_cancelled,
+        };
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
         {
@@ -241,13 +263,15 @@ impl Pipeline {
 
         {
             let state = Arc::clone(&state);
-            let busy = Arc::clone(&busy);
+            let worker_flags = worker_flags.clone();
             let timer_tx = tx.clone();
             let metering = Metering {
                 mic_level,
                 mic_voiced,
             };
-            std::thread::spawn(move || handler_loop(app, db, rx, state, busy, timer_tx, metering));
+            std::thread::spawn(move || {
+                handler_loop(app, db, rx, state, worker_flags, timer_tx, metering)
+            });
         }
 
         Self {
@@ -270,9 +294,9 @@ impl Pipeline {
         self.control_tx.send(Msg::Hotkey(HotkeyEvent::Down)).is_ok()
     }
 
-    /// Finishes the active recording (Flow Bar click or Esc).
+    /// Finishes the active recording from the Flow Bar or tray.
     pub fn stop_manual(&self) {
-        let _ = self.control_tx.send(Msg::Hotkey(HotkeyEvent::Up));
+        let _ = self.control_tx.send(Msg::Stop);
     }
 
     /// Cancels the active session, discarding audio (Esc while recording).
@@ -313,7 +337,7 @@ impl Pipeline {
             PipelineState::Idle => {
                 self.start_manual();
             }
-            PipelineState::Recording => {
+            PipelineState::Recording | PipelineState::Paused => {
                 self.stop_manual();
             }
             _ => {}
@@ -480,7 +504,7 @@ fn handler_loop(
     db: Arc<Store>,
     rx: mpsc::Receiver<Msg>,
     state: Arc<AtomicU8>,
-    busy: Arc<std::sync::atomic::AtomicBool>,
+    worker_flags: WorkerFlags,
     timer_tx: mpsc::Sender<Msg>,
     metering: Metering,
 ) {
@@ -531,12 +555,26 @@ fn handler_loop(
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Hotkey(HotkeyEvent::Down) => {
+                // Double-Esc is only meaningful across consecutive idle Esc
+                // presses. Starting/resuming dictation breaks that sequence.
+                last_esc_at = None;
                 let toggle = hotkey_is_toggle(&db);
                 if mode != Mode::Idle
                     && state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8()
                 {
                     // Pressing the hotkey while paused resumes capture.
                     audio.resume();
+                    let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                    spawn_max_session_timer(&timer_tx, generation);
+                    if mode == Mode::HandsFree {
+                        last_voice_ms.store(unix_ms(), Ordering::Relaxed);
+                        spawn_handsfree_watchdog(
+                            &timer_tx,
+                            Arc::clone(&last_voice_ms),
+                            Arc::clone(&session_gen),
+                            generation,
+                        );
+                    }
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                     continue;
                 }
@@ -550,7 +588,7 @@ fn handler_loop(
                         &state,
                         &mut audio,
                         &mut current_app,
-                        &busy,
+                        &worker_flags,
                         &timer_tx,
                     );
                     mode = Mode::Idle;
@@ -560,7 +598,7 @@ fn handler_loop(
                     continue;
                 }
                 if mode == Mode::Idle {
-                    if busy.load(Ordering::Relaxed) {
+                    if worker_flags.busy.load(Ordering::Relaxed) {
                         // Previous dictation still processing. In toggle
                         // mode a press during processing would otherwise
                         // ghost-start a session with no key held later —
@@ -585,8 +623,8 @@ fn handler_loop(
                     mode = Mode::Ptt;
                     pending_tap = false;
                     second_tap_down = false;
-                    session_gen.fetch_add(1, Ordering::Relaxed);
-                    spawn_max_session_timer(&timer_tx);
+                    let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                    spawn_max_session_timer(&timer_tx, generation);
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                 }
                 // Down while Ptt (second press of entering double-tap) or
@@ -622,7 +660,7 @@ fn handler_loop(
                         &state,
                         &mut audio,
                         &mut current_app,
-                        &busy,
+                        &worker_flags,
                         &timer_tx,
                     );
                     mode = Mode::Idle;
@@ -653,7 +691,7 @@ fn handler_loop(
                             // a second tap follows, then finish automatically.
                             pending_tap = true;
                             first_tap_at = Some(Instant::now());
-                            spawn_tap_judge(&timer_tx);
+                            spawn_tap_judge(&timer_tx, session_gen.load(Ordering::Relaxed));
                         }
                         TapAction::EnterHandsFree => {
                             // Double-tap confirmed: restart capture cleanly and
@@ -692,7 +730,7 @@ fn handler_loop(
                                     Arc::clone(&session_gen),
                                     gen,
                                 );
-                                spawn_max_session_timer(&timer_tx);
+                                spawn_max_session_timer(&timer_tx, gen);
                             }
                         }
                         TapAction::Finish => {
@@ -706,7 +744,7 @@ fn handler_loop(
                                 &state,
                                 &mut audio,
                                 &mut current_app,
-                                &busy,
+                                &worker_flags,
                                 &timer_tx,
                             );
                             mode = Mode::Idle;
@@ -724,7 +762,7 @@ fn handler_loop(
                         &state,
                         &mut audio,
                         &mut current_app,
-                        &busy,
+                        &worker_flags,
                         &timer_tx,
                     );
                     mode = Mode::Idle;
@@ -745,6 +783,16 @@ fn handler_loop(
                     second_tap_down = false;
                     pending_start = false;
                     transition(&app, &db, &state, PipelineState::Idle, None, None);
+                } else if worker_flags.busy.load(Ordering::Relaxed) {
+                    // Processing runs on a worker and cannot always interrupt
+                    // local inference immediately, but cancellation must make
+                    // its eventual result inert: no command, history row, or
+                    // paste after the user pressed Esc.
+                    worker_flags.cancelled.store(true, Ordering::Relaxed);
+                    pending_start = false;
+                    last_esc_at = None;
+                    transition(&app, &db, &state, PipelineState::Idle, None, None);
+                    emit_warning(&app, "dictation canceled".to_string());
                 } else {
                     // Double-Esc while idle removes the last pasted text.
                     let now = Instant::now();
@@ -765,11 +813,41 @@ fn handler_loop(
                     }
                 }
             }
+            Msg::Stop => {
+                if mode != Mode::Idle {
+                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    finish_session(
+                        &app,
+                        &db,
+                        &state,
+                        &mut audio,
+                        &mut current_app,
+                        &worker_flags,
+                        &timer_tx,
+                    );
+                    mode = Mode::Idle;
+                    pending_tap = false;
+                    first_tap_at = None;
+                    second_tap_down = false;
+                    pending_start = false;
+                }
+            }
             Msg::PauseToggle => {
                 if mode == Mode::Ptt || mode == Mode::HandsFree {
                     let was_paused = state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8();
                     if was_paused {
                         audio.resume();
+                        let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                        spawn_max_session_timer(&timer_tx, generation);
+                        if mode == Mode::HandsFree {
+                            last_voice_ms.store(unix_ms(), Ordering::Relaxed);
+                            spawn_handsfree_watchdog(
+                                &timer_tx,
+                                Arc::clone(&last_voice_ms),
+                                Arc::clone(&session_gen),
+                                generation,
+                            );
+                        }
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     } else {
                         audio.pause();
@@ -782,6 +860,7 @@ fn handler_loop(
                 }
             }
             Msg::Cancel => {
+                worker_flags.cancelled.store(true, Ordering::Relaxed);
                 audio.discard();
                 session_gen.fetch_add(1, Ordering::Relaxed);
                 mode = Mode::Idle;
@@ -796,16 +875,27 @@ fn handler_loop(
                 target_app,
                 reply,
             } => {
-                let accepted = mode == Mode::Idle && !busy.load(Ordering::Relaxed);
+                last_esc_at = None;
+                let accepted = mode == Mode::Idle && !worker_flags.busy.load(Ordering::Relaxed);
                 if accepted {
                     spawn_session_worker(
-                        &app, &db, &state, recording, target_app, &busy, &timer_tx,
+                        &app,
+                        &db,
+                        &state,
+                        recording,
+                        target_app,
+                        &worker_flags,
+                        &timer_tx,
                     );
                 }
                 let _ = reply.send(accepted);
             }
-            Msg::TapJudge => {
-                if pending_tap && !second_tap_down && mode == Mode::Ptt {
+            Msg::TapJudge { generation } => {
+                if generation == session_gen.load(Ordering::Relaxed)
+                    && pending_tap
+                    && !second_tap_down
+                    && mode == Mode::Ptt
+                {
                     // No second tap arrived: treat as a normal release.
                     pending_tap = false;
                     first_tap_at = None;
@@ -816,15 +906,34 @@ fn handler_loop(
                         &state,
                         &mut audio,
                         &mut current_app,
-                        &busy,
+                        &worker_flags,
                         &timer_tx,
                     );
                     mode = Mode::Idle;
                     second_tap_down = false;
                 }
             }
+            Msg::AutoStop { generation } => {
+                if generation == session_gen.load(Ordering::Relaxed) && mode != Mode::Idle {
+                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    finish_session(
+                        &app,
+                        &db,
+                        &state,
+                        &mut audio,
+                        &mut current_app,
+                        &worker_flags,
+                        &timer_tx,
+                    );
+                    mode = Mode::Idle;
+                    pending_tap = false;
+                    first_tap_at = None;
+                    second_tap_down = false;
+                    pending_start = false;
+                }
+            }
             Msg::SessionDone => {
-                busy.store(false, Ordering::Relaxed);
+                worker_flags.busy.store(false, Ordering::Relaxed);
                 if pending_start && mode == Mode::Idle && crate::hotkey::hotkey_held() {
                     // A hotkey press arrived while the worker was busy —
                     // begin that queued dictation now.
@@ -840,7 +949,8 @@ fn handler_loop(
                         pending_tap = false;
                         first_tap_at = None;
                         second_tap_down = false;
-                        spawn_max_session_timer(&timer_tx);
+                        let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                        spawn_max_session_timer(&timer_tx, generation);
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     }
                 }
@@ -864,25 +974,27 @@ fn spawn_handsfree_watchdog(
         }
         let silent_for = unix_ms().saturating_sub(last_voice_ms.load(Ordering::Relaxed));
         if silent_for > HANDS_FREE_SILENCE_STOP_MS {
-            let _ = tx.send(Msg::Hotkey(HotkeyEvent::Up));
+            let _ = tx.send(Msg::AutoStop {
+                generation: target_gen,
+            });
             return;
         }
     });
 }
 
-fn spawn_tap_judge(tx: &mpsc::Sender<Msg>) {
+fn spawn_tap_judge(tx: &mpsc::Sender<Msg>, generation: u64) {
     let tx = tx.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(TAP_JUDGE_WAIT_MS));
-        let _ = tx.send(Msg::TapJudge);
+        let _ = tx.send(Msg::TapJudge { generation });
     });
 }
 
-fn spawn_max_session_timer(tx: &mpsc::Sender<Msg>) {
+fn spawn_max_session_timer(tx: &mpsc::Sender<Msg>, generation: u64) {
     let tx = tx.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(MAX_SESSION_SECS));
-        let _ = tx.send(Msg::Hotkey(HotkeyEvent::Up));
+        let _ = tx.send(Msg::AutoStop { generation });
     });
 }
 
@@ -892,13 +1004,13 @@ fn finish_session(
     state: &Arc<AtomicU8>,
     audio: &mut AudioEngine,
     current_app: &mut String,
-    busy: &std::sync::atomic::AtomicBool,
+    worker_flags: &WorkerFlags,
     done_tx: &mpsc::Sender<Msg>,
 ) {
     match audio.stop() {
         Ok(Some(recording)) => {
             let target_app = std::mem::take(current_app);
-            spawn_session_worker(app, db, state, recording, target_app, busy, done_tx);
+            spawn_session_worker(app, db, state, recording, target_app, worker_flags, done_tx);
         }
         Ok(None) => {
             if let Some(note) = audio.take_discard_note() {
@@ -916,15 +1028,17 @@ fn spawn_session_worker(
     state: &Arc<AtomicU8>,
     recording: crate::audio::Recording,
     target_app: String,
-    busy: &std::sync::atomic::AtomicBool,
+    worker_flags: &WorkerFlags,
     done_tx: &mpsc::Sender<Msg>,
 ) {
     // Hand the recording to a worker thread so the hotkey handler can keep
     // reacting while STT/LLM/injection run.
-    busy.store(true, Ordering::Relaxed);
+    worker_flags.busy.store(true, Ordering::Relaxed);
+    worker_flags.cancelled.store(false, Ordering::Relaxed);
     let worker_app = app.clone();
     let worker_db = Arc::clone(db);
     let worker_state = Arc::clone(state);
+    let worker_cancelled = Arc::clone(&worker_flags.cancelled);
     let done_tx = done_tx.clone();
     std::thread::spawn(move || {
         // SessionDone must be sent even if processing panics, otherwise the
@@ -934,11 +1048,12 @@ fn spawn_session_worker(
                 &worker_app,
                 &worker_db,
                 &worker_state,
+                &worker_cancelled,
                 recording,
                 target_app,
             );
         }));
-        if result.is_err() {
+        if result.is_err() && !worker_cancelled.load(Ordering::Relaxed) {
             fail(
                 &worker_app,
                 &worker_db,
@@ -948,6 +1063,25 @@ fn spawn_session_worker(
         }
         let _ = done_tx.send(Msg::SessionDone);
     });
+}
+
+/// Returns true once processing was cancelled and repairs the visible state
+/// if a worker transition raced the handler's immediate Idle transition.
+/// No new worker can start until SessionDone, so this repair cannot clobber a
+/// later dictation.
+fn processing_cancelled(
+    app: &AppHandle,
+    db: &Store,
+    state: &Arc<AtomicU8>,
+    worker_cancelled: &std::sync::atomic::AtomicBool,
+) -> bool {
+    if !worker_cancelled.load(Ordering::Relaxed) {
+        return false;
+    }
+    if state.load(Ordering::Relaxed) != PipelineState::Idle.as_u8() {
+        transition(app, db, state, PipelineState::Idle, None, None);
+    }
+    true
 }
 
 /// Accumulates per-stage wall-clock durations for one dictation and reports
@@ -1002,15 +1136,22 @@ pub(crate) fn run_session(
     app: &AppHandle,
     db: &Arc<Store>,
     state: &Arc<AtomicU8>,
+    worker_cancelled: &Arc<std::sync::atomic::AtomicBool>,
     recording: crate::audio::Recording,
     target_app: String,
 ) {
     let mut timings = StageTimings::begin();
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        return;
+    }
     transition(app, db, state, PipelineState::Transcribing, None, None);
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        return;
+    }
 
     // Language precedence: a matching per-app style's pinned language wins;
     // otherwise the global setting ("auto" by default).
-    let style_info = db.resolve_style_full(&target_app).ok().flatten();
+    let style_info = llm::resolve_style(db, &target_app).ok().flatten();
     let language = style_info
         .as_ref()
         .and_then(|(_, lang)| lang.clone())
@@ -1027,6 +1168,7 @@ pub(crate) fn run_session(
     // without re-recording; success clears any stale job. Streaming deltas
     // are forwarded to the pill as `stt-partial` (cumulative text) so the
     // user watches words appear instead of staring at bouncing dots.
+    let stt_started = timings.mark("session-prep", timings.started);
     let partial_app = app.clone();
     let result = stt::stream_transcribe(
         db,
@@ -1037,7 +1179,11 @@ pub(crate) fn run_session(
             let _ = partial_app.emit("stt-partial", serde_json::json!({ "text": cumulative }));
         },
     );
-    let stt_started = timings.mark("wav-encode+prep", timings.started);
+    let stt_done = timings.mark("stt", stt_started);
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        timings.report(app);
+        return;
+    }
 
     let raw_text = match result {
         Ok(r) => r.text,
@@ -1047,12 +1193,14 @@ pub(crate) fn run_session(
             return fail(app, db, state, e.to_string());
         }
     };
-    let stt_done = timings.mark("stt", stt_started);
     if raw_text.trim().is_empty() {
         crate::store_retry_job(recording.wav, target_app);
         timings.report(app);
         return fail(app, db, state, "transcription came back empty".to_string());
     }
+    // Any non-empty STT result supersedes an older retry, even when the
+    // artifact guard below decides not to paste this particular capture.
+    crate::clear_retry_job();
     // Hallucination guard: a near-silent capture that still produced text is
     // model confabulation — drop it instead of pasting phantom words.
     if recording.max_frame_rms < ARTIFACT_RAW_RMS && is_whisper_artifact(&raw_text) {
@@ -1068,7 +1216,6 @@ pub(crate) fn run_session(
         transition(app, db, state, PipelineState::Idle, None, None);
         return;
     }
-    crate::clear_retry_job();
     let raw_text = crate::emoji::apply(&raw_text);
 
     let data = SessionData::new(recording.duration_ms, target_app, language);
@@ -1077,10 +1224,25 @@ pub(crate) fn run_session(
     let snippet = crate::cloud::try_snippet(db, &raw_text).unwrap_or(None);
     if let Some(expanded) = snippet {
         timings.mark("snippet", stt_done);
-        return finish(app, db, state, &expanded, &raw_text, &data, timings);
+        return finish(
+            app,
+            db,
+            state,
+            worker_cancelled,
+            SessionOutput {
+                final_text: &expanded,
+                raw_text: &raw_text,
+                data: &data,
+            },
+            timings,
+        );
     }
 
     transition(app, db, state, PipelineState::Injecting, None, None);
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        timings.report(app);
+        return;
+    }
 
     // LLM cleanup; fall back to the raw transcription on any failure so a
     // cleanup outage never costs the user their dictation. Skippable for
@@ -1102,6 +1264,10 @@ pub(crate) fn run_session(
         raw_text.clone()
     };
     timings.mark("llm-cleanup", stt_done);
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        timings.report(app);
+        return;
+    }
 
     // Vocabulary learning: diff raw vs polished speech and auto-capture
     // recurring names/jargon (gated by the autoLearnVocabulary setting).
@@ -1111,11 +1277,33 @@ pub(crate) fn run_session(
     if crate::commands::is_enabled(db) {
         if let Some(command) = crate::commands::parse(&polished) {
             timings.report(app);
-            return run_command(app, db, state, &polished, &raw_text, &data, &command);
+            return run_command(
+                app,
+                db,
+                state,
+                worker_cancelled,
+                SessionOutput {
+                    final_text: &polished,
+                    raw_text: &raw_text,
+                    data: &data,
+                },
+                &command,
+            );
         }
     }
 
-    finish(app, db, state, &polished, &raw_text, &data, timings);
+    finish(
+        app,
+        db,
+        state,
+        worker_cancelled,
+        SessionOutput {
+            final_text: &polished,
+            raw_text: &raw_text,
+            data: &data,
+        },
+        timings,
+    );
 }
 
 /// Utterances shorter than this skip LLM cleanup by default: short
@@ -1160,15 +1348,24 @@ fn cleanup_skip_short(db: &Store) -> bool {
         .unwrap_or(true)
 }
 
+#[derive(Clone, Copy)]
+struct SessionOutput<'a> {
+    final_text: &'a str,
+    raw_text: &'a str,
+    data: &'a SessionData,
+}
+
 fn run_command(
     app: &AppHandle,
     db: &Arc<Store>,
     state: &Arc<AtomicU8>,
-    polished: &str,
-    raw_text: &str,
-    data: &SessionData,
+    worker_cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    output: SessionOutput<'_>,
     command: &crate::commands::Command,
 ) {
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        return;
+    }
     match crate::commands::execute(app, command) {
         Ok(()) => {
             eprintln!("command executed: {}", crate::commands::describe(command));
@@ -1179,19 +1376,22 @@ fn run_command(
                 app,
                 db,
                 state,
-                polished,
-                raw_text,
-                data,
+                worker_cancelled,
+                output,
                 StageTimings::begin(),
             );
         }
     }
 
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        return;
+    }
+
     match db.insert_transcript(
-        polished,
-        raw_text,
-        &data.language,
-        data.duration_ms,
+        output.final_text,
+        output.raw_text,
+        &output.data.language,
+        output.data.duration_ms,
         "command",
     ) {
         Ok(transcript) => transition(app, db, state, PipelineState::Idle, None, Some(transcript)),
@@ -1219,17 +1419,23 @@ fn finish(
     app: &AppHandle,
     db: &Arc<Store>,
     state: &Arc<AtomicU8>,
-    final_text: &str,
-    raw_text: &str,
-    data: &SessionData,
+    worker_cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    output: SessionOutput<'_>,
     mut timings: StageTimings,
 ) {
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        timings.report(app);
+        return;
+    }
     transition(app, db, state, PipelineState::Injecting, None, None);
 
     let inject_started = Instant::now();
-    crate::remember_pasted(final_text);
-    if let Err(e) = inject::paste_text(final_text) {
-        store_anyway(db, final_text, raw_text, data);
+    if processing_cancelled(app, db, state, worker_cancelled) {
+        timings.report(app);
+        return;
+    }
+    if let Err(e) = inject::paste_text(output.final_text) {
+        store_anyway(db, output.final_text, output.raw_text, output.data);
         timings.report(app);
         fail(
             app,
@@ -1239,14 +1445,17 @@ fn finish(
         );
         return;
     }
+    // Only arm scratch/undo after the target app actually accepted the paste.
+    // Remembering it before injection made a failed paste undo unrelated text.
+    crate::remember_pasted(&output.data.target_app);
     timings.mark("inject", inject_started);
 
     match db.insert_transcript(
-        final_text,
-        raw_text,
-        &data.language,
-        data.duration_ms,
-        &data.target_app,
+        output.final_text,
+        output.raw_text,
+        &output.data.language,
+        output.data.duration_ms,
+        &output.data.target_app,
     ) {
         Ok(transcript) => {
             transition(app, db, state, PipelineState::Idle, None, Some(transcript));
@@ -1305,5 +1514,17 @@ mod tests {
             TapAction::Finish
         );
         assert_eq!(classify_tap_up(false, false, None), TapAction::Wait);
+    }
+
+    #[test]
+    fn pipeline_event_uses_state_as_the_frontend_discriminator() {
+        let value = serde_json::to_value(PipelineEvent {
+            state: PipelineState::Recording,
+            error: None,
+            transcript: None,
+        })
+        .unwrap();
+        assert_eq!(value.get("type"), Some(&serde_json::json!("recording")));
+        assert!(value.get("state").is_none());
     }
 }

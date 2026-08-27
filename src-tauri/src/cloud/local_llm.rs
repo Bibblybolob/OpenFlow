@@ -43,6 +43,7 @@ pub const LOCAL_LLMS: &[LocalLlm] = &[
 
 const DEFAULT_LOCAL_LLM_ID: &str = "qwen3-4b";
 const MIN_VALID_MODEL_BYTES: u64 = 50 * 1024 * 1024;
+const MIN_EXPECTED_MODEL_PERCENT: u64 = 80;
 static DOWNLOADS_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub(crate) fn catalog_llm(id: &str) -> Option<&'static LocalLlm> {
@@ -84,14 +85,17 @@ pub fn llm_path(id: &str) -> PathBuf {
 }
 
 pub fn is_downloaded(id: &str) -> bool {
-    model_file_is_usable(&llm_path(id))
+    let minimum = catalog_llm(id)
+        .map(|model| model.approx_mb * 1024 * 1024 * MIN_EXPECTED_MODEL_PERCENT / 100)
+        .unwrap_or(MIN_VALID_MODEL_BYTES);
+    model_file_is_usable(&llm_path(id), minimum)
 }
 
-fn model_file_is_usable(path: &Path) -> bool {
+fn model_file_is_usable(path: &Path, minimum_bytes: u64) -> bool {
     path.is_file()
         && path
             .metadata()
-            .map(|metadata| metadata.len() >= MIN_VALID_MODEL_BYTES)
+            .map(|metadata| metadata.len() >= minimum_bytes.max(MIN_VALID_MODEL_BYTES))
             .unwrap_or(false)
 }
 
@@ -112,7 +116,7 @@ mod model_file_tests {
         let file = File::create(&path).unwrap();
         file.set_len(MIN_VALID_MODEL_BYTES - 1).unwrap();
         drop(file);
-        assert!(!model_file_is_usable(&path));
+        assert!(!model_file_is_usable(&path, MIN_VALID_MODEL_BYTES));
         let _ = fs::remove_file(path);
     }
 
@@ -123,7 +127,7 @@ mod model_file_tests {
         let file = File::create(&path).unwrap();
         file.set_len(MIN_VALID_MODEL_BYTES).unwrap();
         drop(file);
-        assert!(model_file_is_usable(&path));
+        assert!(model_file_is_usable(&path, MIN_VALID_MODEL_BYTES));
         let _ = fs::remove_file(path);
     }
 }
@@ -152,6 +156,9 @@ pub fn download_model(app: &tauri::AppHandle, id: &str) -> Result<PathBuf> {
 
     let dest = llm_path(id);
     let result = download_model_inner(app, id, entry, &dest);
+    if result.is_err() {
+        let _ = std::fs::remove_file(dest.with_extension("part"));
+    }
     in_flight.lock().unwrap().remove(id);
     result
 }
@@ -163,6 +170,7 @@ fn download_model_inner(
     dest: &Path,
 ) -> Result<PathBuf> {
     if is_downloaded(id) {
+        let _ = app.emit("local-llm-progress", json!({ "type": "done", "model": id }));
         return Ok(dest.to_path_buf());
     }
     if dest.exists() {
@@ -186,9 +194,8 @@ fn download_model_inner(
     let partial = dest.with_extension("part");
     let mut file = File::create(&partial)?;
 
-    let total = resp
-        .content_length()
-        .unwrap_or(entry.approx_mb * 1024 * 1024);
+    let expected_size = resp.content_length();
+    let total = expected_size.unwrap_or(entry.approx_mb * 1024 * 1024);
     let mut downloaded: usize = 0;
     let mut last_emit_mb: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
@@ -218,7 +225,8 @@ fn download_model_inner(
     file.flush()?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     drop(file);
-    if size < MIN_VALID_MODEL_BYTES {
+    let minimum = entry.approx_mb * 1024 * 1024 * MIN_EXPECTED_MODEL_PERCENT / 100;
+    if size < minimum || expected_size.is_some_and(|expected| size != expected) {
         let _ = std::fs::remove_file(&partial);
         return Err(StoreError::Other(
             "downloaded file looks truncated — please retry".to_string(),

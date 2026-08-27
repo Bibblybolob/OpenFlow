@@ -25,9 +25,22 @@ pub fn polish(
 /// Tone instructions for a session: an explicit pill override (styleOverride
 /// setting) wins over automatic per-app matching.
 pub fn build_style_instructions(db: &Store, app_identifier: &str) -> Result<Option<String>> {
+    Ok(resolve_style(db, app_identifier)?.map(|(instructions, _)| instructions))
+}
+
+/// Resolves the active style as a single source of truth for transcription
+/// language and cleanup tone. A deleted/disabled manual id falls back to
+/// automatic app matching; explicit `none` suppresses both. `-1` is retained
+/// as a compatibility sentinel for older Flow Bar builds.
+pub fn resolve_style(db: &Store, app_identifier: &str) -> Result<Option<(String, Option<String>)>> {
     if let Some(raw) = db.get_setting("styleOverride").ok().flatten() {
         if let Ok(id) = serde_json::from_str::<i64>(&raw) {
-            return db.style_instructions_by_id(id);
+            if id == -1 {
+                return Ok(None);
+            }
+            if let Some(style) = db.style_full_by_id(id)? {
+                return Ok(Some(style));
+            }
         }
         // Explicit "no style" sentinel chosen in the pill: suppress even
         // per-app matching instead of falling back to it.
@@ -35,7 +48,7 @@ pub fn build_style_instructions(db: &Store, app_identifier: &str) -> Result<Opti
             return Ok(None);
         }
     }
-    db.resolve_style_for_app(app_identifier)
+    db.resolve_style_full(app_identifier)
 }
 
 pub fn build_user_prompt(
@@ -126,6 +139,44 @@ mod tests {
         assert!(SYSTEM_PROMPT.contains("never mind"));
         assert!(SYSTEM_PROMPT.contains("final intent"));
         assert!(SYSTEM_PROMPT.contains("emoji"));
+    }
+
+    #[test]
+    fn manual_style_override_controls_tone_and_language() {
+        let db = Store::open(std::path::Path::new(":memory:")).unwrap();
+        db.upsert_style("mail", "Mail", "Formal", Some("en"))
+            .unwrap();
+        let manual = db
+            .upsert_style("chat", "Chat", "Casual", Some("es"))
+            .unwrap();
+        db.set_setting("styleOverride", &serde_json::json!(manual.id))
+            .unwrap();
+        assert_eq!(
+            resolve_style(&db, "com.example.mail").unwrap(),
+            Some(("Casual".to_string(), Some("es".to_string())))
+        );
+    }
+
+    #[test]
+    fn no_style_and_stale_overrides_resolve_intentionally() {
+        let db = Store::open(std::path::Path::new(":memory:")).unwrap();
+        db.upsert_style("mail", "Mail", "Formal", Some("en"))
+            .unwrap();
+
+        db.set_setting("styleOverride", &serde_json::json!("none"))
+            .unwrap();
+        assert_eq!(resolve_style(&db, "com.example.mail").unwrap(), None);
+
+        db.set_setting("styleOverride", &serde_json::json!(-1))
+            .unwrap();
+        assert_eq!(resolve_style(&db, "com.example.mail").unwrap(), None);
+
+        db.set_setting("styleOverride", &serde_json::json!(999_999))
+            .unwrap();
+        assert_eq!(
+            resolve_style(&db, "com.example.mail").unwrap(),
+            Some(("Formal".to_string(), Some("en".to_string())))
+        );
     }
     use crate::store::Store;
 

@@ -113,8 +113,8 @@ export const api = {
 
   cancelRecording: () => invoke<void>("cancel_recording"),
 
-  pasteText: (text: string) =>
-    invoke<void>("paste_text_at_cursor", { text }),
+  pasteText: (text: string, targetApp: string) =>
+    invoke<void>("paste_text_at_cursor", { text, targetApp }),
 
   retryLast: () => invoke<boolean>("retry_last"),
 
@@ -143,7 +143,7 @@ export const api = {
   setAutostart: (enable: boolean) =>
     invoke<void>("autostart_set", { enable }),
 
-  checkMicPermission: () => invoke<void>("check_mic_permission"),
+  checkMicPermission: () => invoke<boolean>("check_mic_permission"),
 
   setFlowbarVisible: (visible: boolean) =>
     invoke<void>("set_flowbar_visible", { visible }),

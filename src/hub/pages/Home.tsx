@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/ipc";
 import type { Stats, Transcript } from "../../lib/types";
@@ -9,6 +9,12 @@ interface HotkeyStatusEvent {
 }
 
 const TRANSCRIPT_PAGE_SIZE = 100;
+
+function readableError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "Re-paste failed. Copy the transcript and paste it manually.";
+}
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
@@ -46,16 +52,26 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [hasMore, setHasMore] = useState(false);
   const [watcher, setWatcher] = useState("waiting-permissions");
+  const [historyActionError, setHistoryActionError] = useState<{
+    id: number;
+    message: string;
+  } | null>(null);
+  const historyRequest = useRef(0);
 
   async function loadTranscripts(offset = 0, append = false) {
+    const request = ++historyRequest.current;
     const page = await api.listTranscripts(TRANSCRIPT_PAGE_SIZE, offset);
+    if (request !== historyRequest.current) return;
     setTranscripts((current) => (append ? [...current, ...page] : page));
     setHasMore(page.length === TRANSCRIPT_PAGE_SIZE);
   }
 
   async function refresh() {
+    // Start history immediately so a search typed during the stats request
+    // can supersede it instead of being overwritten by a late initial load.
+    const history = loadTranscripts();
     setStats(await api.stats());
-    await loadTranscripts();
+    await history;
   }
 
   useEffect(() => {
@@ -64,11 +80,12 @@ export default function Home() {
       .hotkeyWatcherStatus()
       .then(setWatcher)
       .catch(() => {});
-    let unlisten: (() => void) | undefined;
-    listen<HotkeyStatusEvent>("hotkey-status", (e) => setWatcher(e.payload.status)).then(
-      (fn) => (unlisten = fn),
+    const unlisten = listen<HotkeyStatusEvent>("hotkey-status", (e) =>
+      setWatcher(e.payload.status),
     );
-    return () => unlisten?.();
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   const watcherReady = watcher === "ready";
@@ -108,16 +125,22 @@ export default function Home() {
 
   async function onSearch(q: string) {
     setQuery(q);
-    const results = q.trim()
-      ? await api.searchTranscripts(q)
+    const request = ++historyRequest.current;
+    const trimmed = q.trim();
+    const results = trimmed
+      ? await api.searchTranscripts(trimmed)
       : await api.listTranscripts(TRANSCRIPT_PAGE_SIZE);
+    // SQLite requests can complete out of order while a user types quickly.
+    // Only the newest query is allowed to replace the visible history.
+    if (request !== historyRequest.current) return;
     setTranscripts(results);
-    setHasMore(!q.trim() && results.length === TRANSCRIPT_PAGE_SIZE);
+    setHasMore(!trimmed && results.length === TRANSCRIPT_PAGE_SIZE);
   }
 
   async function onDelete(id: number) {
     await api.deleteTranscript(id);
-    await refresh();
+    setTranscripts((current) => current.filter((transcript) => transcript.id !== id));
+    setStats(await api.stats());
   }
 
   async function onCopy(text: string) {
@@ -133,6 +156,15 @@ export default function Home() {
           : transcript,
       ),
     );
+  }
+
+  async function onRepaste(transcript: Transcript) {
+    setHistoryActionError(null);
+    try {
+      await api.pasteText(transcript.text, transcript.targetApp);
+    } catch (error) {
+      setHistoryActionError({ id: transcript.id, message: readableError(error) });
+    }
   }
 
   return (
@@ -201,7 +233,7 @@ export default function Home() {
       <div className="flex flex-col gap-3">
         {transcripts.length === 0 && (
           <p className="text-sm text-neutral-600">
-            No transcripts yet. Hold your hotkey and speak — history will appear
+            No transcripts yet. Use your hotkey and speak — history will appear
             here.
           </p>
         )}
@@ -221,8 +253,17 @@ export default function Home() {
                     {new Date(t.createdAt).toLocaleString()} · {t.wordCount} words ·{" "}
                     {t.targetApp || "unknown app"}
                   </p>
+                  {historyActionError?.id === t.id && (
+                    <p className="mt-1 text-xs text-red-400">
+                      {historyActionError.message}
+                    </p>
+                  )}
                 </div>
-                <div className="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+                <div
+                  className={`flex shrink-0 items-center gap-1 transition group-hover:opacity-100 group-focus-within:opacity-100 ${
+                    t.flagged ? "opacity-100" : "opacity-0"
+                  }`}
+                >
                   <button
                     type="button"
                     onClick={() => onFlag(t.id, t.flagged)}
@@ -243,15 +284,14 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    onClick={async () => {
-                      try {
-                        await api.pasteText(t.text);
-                      } catch (e) {
-                        console.error(e);
-                      }
-                    }}
-                    title="Paste this transcript at your cursor in the focused app"
-                    className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
+                    onClick={() => onRepaste(t)}
+                    disabled={!t.targetApp}
+                    title={
+                      t.targetApp
+                        ? `Switch to ${t.targetApp} and paste this transcript`
+                        : "The original target app is unknown"
+                    }
+                    className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Re-paste
                   </button>

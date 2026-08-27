@@ -245,7 +245,8 @@ impl Store {
             conn.query_row("SELECT COUNT(*) FROM transcripts", [], |r| r.get(0))?;
 
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT date(created_at) FROM transcripts ORDER BY date(created_at) DESC LIMIT 400",
+            "SELECT DISTINCT date(created_at, 'localtime') FROM transcripts
+             ORDER BY date(created_at, 'localtime') DESC LIMIT 400",
         )?;
         let dates: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))?
@@ -553,14 +554,16 @@ impl Store {
             .map(|s| (s.instructions.clone(), s.language.clone())))
     }
 
-    /// Instructions for an exact style id (the pill's manual override path).
-    pub fn style_instructions_by_id(&self, id: i64) -> Result<Option<String>> {
+    /// Full style data for an exact enabled id. Returning the pinned language
+    /// here keeps a manual Flow Bar override consistent across both STT and
+    /// cleanup instead of changing tone while retaining another app's language.
+    pub fn style_full_by_id(&self, id: i64) -> Result<Option<(String, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
         Ok(conn
             .query_row(
-                "SELECT instructions FROM styles WHERE id = ?1 AND enabled = 1",
+                "SELECT instructions, language FROM styles WHERE id = ?1 AND enabled = 1",
                 params![id],
-                |r| r.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?)
     }
@@ -638,12 +641,7 @@ fn now_iso(conn: &Connection) -> Result<String> {
 }
 
 fn local_date_today() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let days = now / 86_400;
-    civil_from_days(days)
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 fn days_between(from_iso_date: &str, to_iso_date: &str) -> i64 {
@@ -665,19 +663,6 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
-}
-
-fn civil_from_days(z: i64) -> String {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 #[cfg(test)]

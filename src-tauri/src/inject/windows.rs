@@ -1,9 +1,8 @@
 use std::thread;
 use std::time::Duration;
 
-use arboard::Clipboard;
-use windows::core::PWSTR;
-use windows::Win32::Foundation::CloseHandle;
+use windows::core::{BOOL, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
@@ -20,7 +19,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 const VK_Z: VIRTUAL_KEY = VIRTUAL_KEY(0x5A);
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, SW_RESTORE,
+};
 
 pub fn is_accessibility_trusted() -> bool {
     true
@@ -31,24 +33,17 @@ pub fn is_accessibility_trusted() -> bool {
 /// cannot reach apps running elevated (as administrator) from a non-elevated
 /// process.
 pub fn paste_text(text: &str) -> Result<(), String> {
-    let mut clipboard = Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
-    let previous = clipboard.get_text().ok();
-
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|e| format!("failed to stage clipboard: {e}"))?;
-
-    send_ctrl_v()?;
-
-    if let Some(previous) = previous {
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(800));
-            if let Ok(mut cb) = Clipboard::new() {
-                let _ = cb.set_text(previous);
-            }
-        });
+    let restore_generation = super::stage_clipboard_text(text)?;
+    // Give Windows' clipboard owner a moment to publish the new data before
+    // the target app handles Ctrl+V, matching the macOS injection path.
+    thread::sleep(Duration::from_millis(40));
+    let paste_result = send_ctrl_v();
+    if paste_result.is_ok() {
+        super::restore_clipboard_later(restore_generation);
+    } else {
+        super::keep_staged_clipboard(restore_generation);
     }
-    Ok(())
+    paste_result
 }
 
 fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -104,39 +99,98 @@ pub fn undo_paste() -> Result<(), String> {
 pub fn frontmost_app() -> String {
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.is_invalid() {
-            return String::new();
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == 0 {
-            return String::new();
-        }
+        process_name_for_window(hwnd).unwrap_or_default()
+    }
+}
 
-        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return String::new();
-        };
+fn process_name_for_window(hwnd: HWND) -> Option<String> {
+    if hwnd.is_invalid() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
 
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let result = QueryFullProcessImageNameW(
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
             process,
             PROCESS_NAME_WIN32,
             PWSTR(buf.as_mut_ptr()),
             &mut len,
-        );
-        let _ = CloseHandle(process);
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    result.ok()?;
 
-        if result.is_err() {
-            return String::new();
-        }
+    Some(
         String::from_utf16_lossy(&buf[..len as usize])
             .rsplit(['\\', '/'])
             .next()
             .unwrap_or("")
             .trim_end_matches(".exe")
-            .to_lowercase()
+            .to_lowercase(),
+    )
+}
+
+struct WindowSearch {
+    target: String,
+    found: HWND,
+}
+
+unsafe extern "system" fn find_target_window(hwnd: HWND, param: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(param.0 as *mut WindowSearch) };
+    if unsafe { IsWindowVisible(hwnd) }.as_bool()
+        && process_name_for_window(hwnd).as_deref() == Some(search.target.as_str())
+    {
+        search.found = hwnd;
+        return false.into();
     }
+    true.into()
+}
+
+/// Focuses a visible top-level window owned by the recorded target process.
+/// Because this runs directly from a user click in FlowClone's foreground
+/// window, Windows permits the foreground transfer in normal applications.
+pub fn focus_app(identifier: &str) -> Result<(), String> {
+    let target = identifier.trim().trim_end_matches(".exe").to_lowercase();
+    if target.is_empty() || target == "flowclone" {
+        return Err("the original target app is unknown".to_string());
+    }
+
+    let mut search = WindowSearch {
+        target: target.clone(),
+        found: HWND::default(),
+    };
+    // EnumWindows reports a false return as an error when our callback stops
+    // early. The populated HWND is the source of truth, so that result is
+    // intentionally ignored.
+    let _ = unsafe {
+        EnumWindows(
+            Some(find_target_window),
+            LPARAM((&mut search as *mut WindowSearch) as isize),
+        )
+    };
+    if search.found.is_invalid() {
+        return Err("the original target app is no longer running".to_string());
+    }
+    if unsafe { IsIconic(search.found) }.as_bool() {
+        unsafe { ShowWindow(search.found, SW_RESTORE) };
+    }
+    if !unsafe { SetForegroundWindow(search.found) }.as_bool() {
+        return Err("the original target app did not accept focus".to_string());
+    }
+    for _ in 0..10 {
+        thread::sleep(Duration::from_millis(25));
+        if frontmost_app() == target {
+            return Ok(());
+        }
+    }
+    Err("the original target app did not accept focus".to_string())
 }
 
 /// Reads up to 400 characters immediately before the caret from the focused

@@ -68,14 +68,20 @@ pub fn parse(text: &str) -> Option<Command> {
     }
 
     if let Some(rest) = strip_prefix_ci(trimmed, "open ") {
-        let site = rest.trim().trim_end_matches(['.', '!', '?']).to_lowercase();
-        if !site.is_empty() && !site.contains(' ') {
-            if let Some((_, url)) = SITES.iter().find(|(name, _)| *name == site) {
+        let site = rest.trim().trim_end_matches(['.', '!', '?']);
+        let site_key = site.to_lowercase();
+        if !site.is_empty() {
+            // Check named destinations before the single-token domain gate;
+            // otherwise entries such as "google docs" can never match.
+            if let Some((_, url)) = SITES.iter().find(|(name, _)| *name == site_key) {
                 return Some(Command::OpenUrl(url.to_string()));
             }
-            if site.contains('.') && !site.starts_with('.') {
-                let url = if site.starts_with("http://") || site.starts_with("https://") {
-                    site
+            if !site.chars().any(char::is_whitespace)
+                && site.contains('.')
+                && !site.starts_with('.')
+            {
+                let url = if site_key.starts_with("http://") || site_key.starts_with("https://") {
+                    site.to_string()
                 } else {
                     format!("https://{site}")
                 };
@@ -174,6 +180,16 @@ mod tests {
         assert_eq!(
             parse("open news.ycombinator.com"),
             Some(Command::OpenUrl("https://news.ycombinator.com".to_string()))
+        );
+        assert_eq!(
+            parse("open google docs"),
+            Some(Command::OpenUrl("https://docs.google.com".to_string()))
+        );
+        assert_eq!(
+            parse("open example.com/CaseSensitivePath"),
+            Some(Command::OpenUrl(
+                "https://example.com/CaseSensitivePath".to_string()
+            ))
         );
     }
 

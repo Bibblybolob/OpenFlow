@@ -1,178 +1,264 @@
 # OpenFlow
-# VIBE-CODED
-**Speak naturally.** Ramble, pause, or change your mind mid-sentence — Flow understands what you mean, not just what you say. **Flow edits as you speak:** text that reads like you wrote it, not like you spoke it, with filler words removed, punctuation added, and your writing formatted automatically.
 
-OpenFlow (FlowClone) is push-to-talk voice dictation for macOS and Windows. Hold a hotkey, speak naturally, release — your words are transcribed, cleaned up by an LLM, and pasted at your cursor in any app.
+OpenFlow is the project name. The installed application name is FlowClone.
 
-Built with **Tauri 2** (Rust core + React/TypeScript UI).
+FlowClone converts speech to text on macOS and Windows. FlowClone processes the recorded audio on the device.
 
-## Features
+By default, press `Right Shift` once to start a dictation session. Press `Right Shift` again to stop the session.
 
-- **Push-to-talk dictation** — hold the hotkey (default `Right Shift`), speak, release. Text is transcribed, cleaned up locally, and pasted at your cursor.
-- **Hands-free mode** — double-tap the hotkey to keep recording without holding; tap again or press Esc to finish.
-- **Pause & resume** — pause an active dictation from the pill and pick up mid-thought without ending the session.
-- **Microphone picker** — dictate through any input device (or the system default); the choice survives restarts.
-- **Start/stop chimes** — subtle synthesized audio feedback when a session opens and closes (toggleable).
-- **Silence intelligence** — leading/trailing silence is trimmed before inference (adaptive noise-floor threshold, mid-sentence pauses preserved), and hands-free sessions auto-stop after ~5 s of quiet so walking away never leaves a giant accidental transcript.
-- **On-device transcription and cleanup** — Whisper.cpp (or optional Parakeet) transcribes locally, then the bundled llama.cpp cleanup engine rewrites raw speech into clear prose: filler removal, punctuation, spoken formatting ("new paragraph", "numbered list"), and backtrack handling.
-- **Offline model choices** — choose a Whisper model and optional cleanup model in Settings; downloads show progress, reject truncated files, and can be retried safely.
-- **Voice commands** — say "open youtube", "search rust async", or "copy …" to act instead of typing (toggleable).
-- **Personal dictionary** — teach it names and jargon; starred terms get priority; misspelling rules auto-correct. Flow also **learns vocabulary on its own**: it diffs raw speech against the cleaned text, silently adopts recurring proper-noun fixes, and queues uncertain ones for one-click review on the Dictionary page.
-- **Cursor-context awareness** — dictation continues what you already wrote: cleanup sees the text before your caret and stitches itself in coherently.
-- **Local transcription** — the on-device engine keeps audio off the network; the flowbar shows recording levels and processing state while inference runs.
-- **Backtrack handling & emoji commands** — mid-sentence "wait / actually / never mind" corrections collapse to your final intent, and spoken emoji requests ("insert party emoji") render the real thing.
-- **Per-app languages** — pin a transcription language to an app rule (e.g. Spanish in WhatsApp); it overrides the global setting for that app only.
-- **Quick style override** — right-click the pill to force a tone for this session (or back to per-app matching), without touching Settings.
-- **Snippets** — voice shortcuts that expand to full text locally, with zero API latency on exact matches.
-- **Per-app styles** — tone instructions matched against the frontmost app's bundle identifier (e.g., formal in Mail, casual in Slack).
-- **Flow Bar** — floating, focus-safe pill with an always-on live waveform (real mic levels, independent of the animations setting) plus a "mic silent?" alert when the capture stream hears nothing for 2s. Levels are pulled by the pill on a timer rather than pushed via events, so WebKit's throttling of overlay windows can never freeze the indicator — so you always know whether the pill is actually listening; click-to-dictate; drag it anywhere or snap it to screen-edge presets (remembered across restarts). Hide it when idle (it pops in only while dictating), and customize shape, accent color, opacity, and animations in Settings.
-- **Menu-bar tray** — status tooltip plus Start/Stop, Cancel, Open Hub, and Quit from any app, even while the pill is hidden.
-- **History with actions** — searchable transcript history grouped by day with word counts and streaks; older pages can be loaded on demand, and every row can be starred, copied, or re-pasted at the cursor in the focused app.
-- **Scratch that** — say "scratch that", double-tap Esc, or retry failed transcriptions from the pill; undo works on re-pasted history too.
-- **Multi-language** — 19 languages plus auto-detect for transcription.
-- **Customizable hotkey** — any of F1–F12, CapsLock, or right-side modifiers (default **Right Shift**: under both palms, never types a character, and never intercepted by macOS features the way F5 is); applies live and migrates stale key names on upgrade.
-- **Self-healing hotkey watcher** — if Input Monitoring is revoked (e.g. after replacing the app bundle), the watcher reports its state to the Hub ("waiting for permission / active / unavailable") and recovers automatically once the permission returns; microphone failures surface on the pill instead of silently doing nothing.
-- **Reliable Flow Bar visibility** — the pill is shown natively by the Rust core on every state change (not just via webview events), its position is clamped to the visible monitor, and the webview reconciles against the pipeline state as a fallback — so dictation always has a visible indicator.
-- **Guided onboarding** — first-launch wizard walks through permissions, downloads a usable transcription model with live progress, then runs a real dictation test before unlocking the app.
-- **Privacy-first storage** — everything local in SQLite; audio is transient; model inference and cleanup stay on-device. The only network access is the model download you request.
+You can also select push-to-talk mode in Settings.
+
+FlowClone uses Tauri 2, Rust, React, and TypeScript.
+
+## Main functions
+
+FlowClone has these main functions:
+
+- FlowClone supports toggle mode and push-to-talk mode.
+- Push-to-talk mode supports hands-free dictation. Press the hotkey two times quickly to start this mode.
+- FlowClone stops a hands-free session after approximately 1.5 seconds without detected speech.
+- You can pause, continue, stop, or cancel a dictation session.
+- You can select the system microphone or a specified microphone.
+- The application can make a sound when a dictation session starts or stops.
+- The audio engine can reduce noise. The audio engine removes silence before transcription.
+- A local Whisper model converts the audio to text. A build can also include Parakeet.
+- A local llama.cpp model can remove filler words and correct the text.
+- FlowClone can paste the raw text if the cleanup model has an error.
+- Exact snippet matches expand without the cleanup model.
+- Voice commands can open a website, do a search, copy text, or remove the last paste.
+- The dictionary stores names, terms, and replacement rules.
+- FlowClone can add frequent vocabulary corrections to the dictionary or to a review list.
+- Cleanup can use the text before the cursor as context.
+- Application styles can specify the cleanup instructions and the transcription language.
+- You can select a style from the Flow Bar.
+- FlowClone supports 18 specified languages and automatic language detection.
+- The Flow Bar shows the microphone level and the pipeline state.
+- The system tray gives controls for the dictation session, the Hub, and the application.
+- The Hub stores searchable transcript history. You can flag, copy, delete, or paste a transcript again.
+- The onboarding procedure checks permissions and helps you download the first transcription model.
+
+## Data and network use
+
+FlowClone stores the history, dictionary, snippets, styles, and settings in a local SQLite database.
+
+FlowClone keeps each audio recording in memory. FlowClone does not store recorded audio in the database.
+
+FlowClone does not send recorded audio to a network service. The application uses the network for model downloads and update checks.
 
 ## Architecture
 
-```
-┌─────────────────── React UI (webview windows) ───────────────────┐
-│  Hub: Home/History · Dictionary · Snippets · Style · Settings    │
-│  Flow Bar: transparent always-on-top dictation pill              │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │ Tauri IPC commands + events
-┌────────────────────────────▼───────────── Rust Core ─────────────┐
-│ hotkey.rs    global push-to-talk watcher (tap vs hold detection) │
-│ audio.rs     cpal mic capture → 16-bit WAV + RMS level events    │
-│ pipeline.rs  FSM: idle → recording → transcribing → injecting    │
-│ cloud/local_stt.rs Whisper.cpp / optional Parakeet inference     │
-│ cloud/local_llm.rs local cleanup via the cleanup-engine sidecar  │
-│ cloud/llm.rs Shared cleanup prompt + style construction          │
-│ commands.rs  Voice command parser + executor                     │
-│ inject/      Clipboard-paste: System Events (macOS), SendInput    │
-│              Ctrl+V (Windows)                                    │
-│ store.rs     SQLite: transcripts, dictionary, snippets, styles   │
-└───────────────────────────────────────────────────────────────────┘
-```
+The project has these main components:
 
-### Dictation flow
+| Component | Function |
+| --- | --- |
+| React user interface | Shows the Hub and the Flow Bar. |
+| Tauri IPC | Connects the user interface to the Rust core. |
+| `hotkey.rs` and `hotkey_tap.rs` | Detect global hotkey events. |
+| `audio.rs` | Captures microphone input and makes 16-bit WAV data. |
+| `pipeline.rs` | Controls recording, transcription, cleanup, commands, and paste operations. |
+| `cloud/local_stt.rs` | Runs local Whisper transcription and selects the optional Parakeet engine. |
+| `cloud/local_llm.rs` | Runs local cleanup in the `cleanup-engine` process. |
+| `commands.rs` | Identifies and runs voice commands. |
+| `inject/` | Sends paste and undo shortcuts on macOS and Windows. |
+| `store.rs` | Stores application data in SQLite. |
 
-1. Hotkey down → frontmost app captured for style matching, mic stream opens.
-2. Hotkey up → audio is resampled to 16 kHz mono and encoded as WAV in memory.
-3. Transcription runs locally through the selected Whisper or Parakeet model
-   (dictionary terms and recent transcript context are used as a bias prompt).
-   Local inference emits the completed text in one piece, so audio never
-   leaves the device.
-4. Snippet fast-path: exact trigger match expands locally, no LLM call.
-5. Local LLM cleanup polishes the text (skippable via Settings → Cleanup;
-   short utterances under ~120 chars skip it automatically via "Fast path";
-   raw text is always the fallback if cleanup fails — you never lose a
-   dictation).
-5b. Cursor context: while recording, the ~400 characters before your caret
-   are read in the background through macOS Accessibility or Windows UI
-   Automation when the focused control exposes a text pattern. Cleanup uses
-   them to continue the surrounding sentence coherently.
-6. Command mode check: recognized commands execute instead of pasting.
-7. Text is staged on the clipboard, Cmd+V synthesized natively via CGEvent
-   (macOS) or SendInput Ctrl+V (Windows) into the target app, clipboard
-   restored.
+## Dictation sequence
 
-Processing runs on a worker thread, so the hotkey stays responsive while a
-dictation is transcribing — a press during that window queues the next
-session automatically. Per-stage timings are logged to stderr and emitted as
-`pipeline-timing` events for latency profiling.
+FlowClone uses this sequence for each dictation session:
 
-## Getting started
+1. The hotkey starts a dictation session.
+2. FlowClone saves the target application and starts the selected microphone.
+3. The audio engine converts the input to 16 kHz mono WAV data.
+4. The selected local model converts the audio to text.
+5. FlowClone expands an exact snippet match without the cleanup model.
+6. If you enable cleanup, the local cleanup model corrects the text.
+7. A recognized voice command runs instead of a paste operation.
+8. FlowClone stages the text on the clipboard and sends the paste shortcut.
+9. FlowClone restores the previous clipboard value if the clipboard did not change.
 
-Prerequisites: Node 20+, Rust stable, Xcode CLT (macOS).
+A worker thread does transcription, cleanup, command, and paste operations. The hotkey thread remains available while the worker thread operates.
+
+Press `Esc` during recording or processing to cancel the result.
+
+## Development setup
+
+### Requirements
+
+The development environment has these requirements:
+
+- Node.js 22
+- npm
+- Rust stable
+- Xcode Command Line Tools on macOS
+- Microsoft C++ Build Tools on Windows
+- CMake for the cleanup engine
+
+Run these commands from the repository root:
 
 ```bash
 npm install
+npm run copy-engine
 npm run tauri dev
 ```
 
-First run:
+The `copy-engine` command makes a required placeholder when no cleanup-engine binary is available.
 
-1. Grant **Accessibility** permission when prompted (Settings → Privacy & Security → Accessibility) — required for paste injection and app detection.
-2. Grant **Input Monitoring** permission (Settings → Privacy & Security → Input Monitoring) — required for the global hotkey watcher. The Hub shows live status for both and can open the right pane.
-3. Grant **Microphone** access on first dictation.
-4. In the onboarding model step, download at least one transcription model.
-   Cleanup models can be downloaded later from Settings → Cleanup.
-
-Then hold `Right Shift` anywhere and talk.
-
-> **Note:** replacing the app bundle (e.g., rebuilding or updating an ad-hoc-signed build) silently revokes Accessibility + Input Monitoring on macOS. If the hotkey stops working after an update, re-toggle both permissions.
-
-### Platform notes
-
-- **macOS** — requires Accessibility permission (paste injection, frontmost-app detection), Input Monitoring permission (global hotkey), and Microphone permission. Paste is performed by staging the clipboard and synthesizing Cmd+V via System Events; the clipboard is restored ~800 ms later. Hotkey detection uses a polling watcher gated on both permissions; it starts automatically once they are granted.
-- **Windows** — no permission prompts needed. Paste uses SendInput to synthesize Ctrl+V with the same clipboard save/restore dance. UI Automation supplies caret context in text controls that expose `TextPattern`; unsupported controls simply run cleanup without context. Known limitation: injection cannot reach apps running elevated (as administrator) unless FlowClone is elevated too. Frontmost-app detection returns the process name (e.g. `chrome`), which per-app styles match against.
-
-### Production build & releases
+To make a complete offline application bundle, run this command:
 
 ```bash
-npm run tauri build          # local bundle (NSIS/MSI on Windows, .app on macOS)
+npm run build:offline
 ```
 
-Releases are automated: push a tag (`git tag v0.1.0 && git push origin v0.1.0`) and CI builds signed bundles for macOS (Apple Silicon + Intel) and Windows via `tauri-action`, publishing them to a draft GitHub Release along with `latest.json` — the manifest the in-app updater polls.
+This command builds the cleanup engine, stages its binary, and then builds the application bundle.
 
-One-time setup for that pipeline:
+## First use
 
-1. **Updater keypair**: `npm run tauri signer generate -w ~/.tauri/openflow.key`. Put the **public** key into `src-tauri/tauri.conf.json → plugins.updater.pubkey`, and the private key + password into repo secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-2. **macOS signing/notarization** (optional for personal use): set `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` repo secrets. Unsigned mac builds still run locally; notarized ones install cleanly on other machines.
-3. In-app updates land in **Settings → Check for updates**.
+Before you use FlowClone for the first time, do these steps:
 
-## Testing
+1. Start FlowClone.
+2. On macOS, grant Accessibility permission.
+3. On macOS, grant Input Monitoring permission.
+4. Grant Microphone permission.
+5. On the onboarding model page, select a Whisper model.
+6. Select **Download**.
+7. Wait until the model status is **Ready**.
+8. Complete the dictation test.
+
+To use the default toggle mode, do these steps:
+
+1. Put the text cursor in the target application.
+2. Press `Right Shift`.
+3. Speak.
+4. Press `Right Shift` again.
+
+FlowClone pastes the result at the text cursor.
+
+## Model management
+
+If a transcription model is not available, do these steps:
+
+1. Open the Hub.
+2. Open **Settings**.
+3. Go to **Transcription**.
+4. Select **Whisper**.
+5. Select **Download** for the applicable model.
+6. Wait until the model status is **Ready**.
+
+A build with the `parakeet` feature shows the Parakeet control. Standard builds use Whisper.
+
+Open **Settings**, and then go to **Cleanup** to download a cleanup model.
+
+FlowClone verifies the downloaded file size. If a download is incomplete, select **Retry**.
+
+## Platform information
+
+### macOS
+
+FlowClone requires Accessibility, Input Monitoring, and Microphone permissions.
+
+FlowClone stages text on the clipboard and sends `Command+V` with CoreGraphics. FlowClone uses System Events if CoreGraphics cannot send the shortcut.
+
+After 800 ms, FlowClone restores the previous clipboard value if the clipboard did not change.
+
+The native event tap detects the global hotkey. The event tap starts after the required permissions are available.
+
+macOS can remove permissions after an application bundle changes. Grant the permissions again after an update if the hotkey does not operate.
+
+### Windows
+
+Windows does not require Accessibility or Input Monitoring permission.
+
+FlowClone stages text on the clipboard and sends `Ctrl+V` with `SendInput`.
+
+UI Automation reads cursor context when the target control supports `TextPattern`.
+
+If the target application runs as administrator, start FlowClone as administrator.
+
+## Build and release process
+
+Each push to `main` starts tests and a rolling development build. CI builds macOS and Windows packages.
+
+CI publishes the development packages in the `dev` release. FlowClone can show the new version in **Settings**.
+
+Use a version tag to build a stable release:
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml   # unit tests (store, audio, hotkey, llm, commands)
-cargo clippy --manifest-path src-tauri/Cargo.toml # lint gate (-D warnings)
-npm run build                                     # TS typecheck + vite build
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt, clippy, tests, and frontend builds on both macOS and Windows runners; tags (`v*`) cut signed release bundles via tauri-action.
+The release process requires these repository secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+
+The updater public key is in `src-tauri/tauri.conf.json`.
+
+## Validation
+
+On a new checkout, run `npm run copy-engine` before the Rust commands.
+
+Run these commands before you submit a change:
+
+```bash
+npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Use these commands to validate the optional engines:
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --features parakeet
+cargo clippy --manifest-path src-tauri/Cargo.toml --features parakeet -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --features engine --bins -- -D warnings
+```
+
+The `ci.yml` workflow runs the standard checks on macOS and Windows.
 
 ## Troubleshooting
 
-### macOS: "FlowClone is damaged and can't be opened" / no "Open Anyway"
+### FlowClone shows "The transcription model is not downloaded"
 
-Release DMGs are currently **ad-hoc signed** (no Apple Developer certificate), so Gatekeeper's download-provenance check fails and macOS may refuse to open the app *without* offering "Open Anyway". Remove the quarantine flag once after installing:
+Open **Settings**, and then go to **Transcription**. Select **Whisper**, and then select **Download** for a model.
+
+If the model list does not appear, select **Retry**. Restart FlowClone if the list still does not appear.
+
+### macOS shows the "FlowClone is damaged" message
+
+Current macOS packages use an ad-hoc signature. Gatekeeper can prevent the first start.
+
+After you put FlowClone in the Applications folder, run this command one time:
 
 ```bash
 xattr -cr /Applications/FlowClone.app
 ```
 
-The app then launches normally. Long-term fix requires an Apple Developer certificate: add the six `APPLE_*` secrets (uncomment them in `.github/workflows/ci.yml`) and future releases will be signed and notarized.
+### The macOS hotkey does not operate after an update
 
-### macOS: hotkey does nothing after an update/rebuild
+Do these steps:
 
-Ad-hoc signatures change on every build, and macOS ties TCC permissions to the signature — so replacing the bundle revokes **Input Monitoring** (and Accessibility) silently. The dictation pipeline waits for both permissions before starting the hotkey watcher, so the symptom is "hotkey dead, no errors". Fix: System Settings → Privacy & Security → toggle FlowClone back on under **Input Monitoring** and **Accessibility**, then relaunch. The Hub's Settings page shows live status for both.
+1. Open **System Settings**.
+2. Open **Privacy & Security**.
+3. Open **Input Monitoring** and enable FlowClone.
+4. Open **Accessibility** and enable FlowClone.
+5. Restart FlowClone.
 
-### macOS: pill doesn't appear while recording
+The Settings page shows the current state of both permissions.
 
-The pill window is shown/hidden natively by the Rust core on every pipeline transition, its position is clamped into the visible monitor area on each show, and the webview additionally reconciles state via polling — a missed event or an off-screen saved position can no longer leave you recording blind. If it still misbehaves, check that `flowBarPos` in the app DB isn't pinned to a disconnected display.
+### Windows SmartScreen shows a warning
 
-### Windows: SmartScreen warning on first install
+The Windows package does not have a commercial code-signing certificate. SmartScreen can show a warning during the first installation.
 
-Unsigned installers trigger "Windows protected your PC". Click **More info → Run anyway**, or use the `.msi` variant. Injection into apps running as Administrator requires OpenFlow to run elevated too.
+In SmartScreen, select **More info**, and then select **Run anyway**.
 
-## Milestones
+## Documentation language
 
-| # | Scope | Status |
-|---|-------|--------|
-| 1 | Tauri + React scaffold, SQLite schema, Hub shell | ✅ |
-| 2 | Core loop: hotkey → capture → STT → paste | ✅ |
-| 3 | Flow Bar window, live waveform, toggle/cancel | ✅ |
-| 4 | LLM cleanup (OpenAI + Claude), snippets, styles | ✅ |
-| 5 | Hands-free, hotkey customization, languages, autostart | ✅ |
-| 6 | Voice commands, error auto-dismiss polish | ✅ |
-| 7 | Windows port (SendInput injection, frontmost app) | ✅ |
-| 8 | Onboarding wizard + permission gates + model setup | ✅ |
-| 9 | Packaging, updater, signing pipeline | ✅ |
+This README uses [ASD-STE100 Issue 9](https://www.asd-ste100.org/assets/files/ASD-STE100_ISSUE9.pdf) as its language reference.
+
+Software terms, file names, and command text are technical nouns or technical verbs.
 
 ## License
 
-MIT
+The MIT License applies to this project.

@@ -63,6 +63,7 @@ fn catalog_model(model_id: &str) -> Option<&'static LocalModel> {
 
 const MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 const MIN_VALID_MODEL_BYTES: u64 = 1024 * 1024;
+const MIN_EXPECTED_MODEL_PERCENT: u64 = 80;
 static MODELS_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Cache of the loaded whisper context keyed by model id. Model loading is
 /// by far the slowest part of local transcription; reuse it across sessions.
@@ -122,17 +123,20 @@ pub fn resolve_local_engine(db: &Store) -> LocalEngine {
 }
 
 pub fn is_downloaded(model_id: &str) -> bool {
-    model_file_is_usable(&model_path(model_id))
+    let minimum = catalog_model(model_id)
+        .map(|model| model.approx_mb * 1024 * 1024 * MIN_EXPECTED_MODEL_PERCENT / 100)
+        .unwrap_or(MIN_VALID_MODEL_BYTES);
+    model_file_is_usable(&model_path(model_id), minimum)
 }
 
 /// A zero-byte or tiny file can be left behind by a failed installer or a
 /// manually interrupted copy. Treat it as missing so the downloader can
 /// repair it instead of sending an opaque model-load error to transcription.
-fn model_file_is_usable(path: &Path) -> bool {
+fn model_file_is_usable(path: &Path, minimum_bytes: u64) -> bool {
     path.is_file()
         && path
             .metadata()
-            .map(|metadata| metadata.len() >= MIN_VALID_MODEL_BYTES)
+            .map(|metadata| metadata.len() >= minimum_bytes.max(MIN_VALID_MODEL_BYTES))
             .unwrap_or(false)
 }
 
@@ -162,6 +166,9 @@ pub fn download_model(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
     drop(guard);
 
     let result = download_model_inner(app, model_id);
+    if result.is_err() {
+        let _ = std::fs::remove_file(model_path(model_id).with_extension("part"));
+    }
     in_flight.lock().unwrap().remove(model_id);
     result
 }
@@ -169,6 +176,10 @@ pub fn download_model(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
 fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
     let dest = model_path(model_id);
     if is_downloaded(model_id) {
+        let _ = app.emit(
+            "local-model-progress",
+            serde_json::json!({ "type": "done", "model": model_id }),
+        );
         return Ok(dest);
     }
     if dest.exists() {
@@ -227,10 +238,13 @@ fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
     file.flush()?;
     drop(file);
 
-    if std::fs::metadata(&partial)
-        .map(|metadata| metadata.len() < MIN_VALID_MODEL_BYTES)
-        .unwrap_or(true)
-    {
+    let size = std::fs::metadata(&partial)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let minimum = catalog_model(model_id)
+        .map(|model| model.approx_mb * 1024 * 1024 * MIN_EXPECTED_MODEL_PERCENT / 100)
+        .unwrap_or(MIN_VALID_MODEL_BYTES);
+    if size < minimum || (total > 0 && size != total) {
         let _ = std::fs::remove_file(&partial);
         return Err(StoreError::Other(
             "downloaded file looks truncated — please retry".to_string(),
@@ -260,12 +274,12 @@ mod model_file_tests {
     fn tiny_or_missing_model_is_not_downloaded() {
         let path = temp_path("tiny-model");
         let _ = fs::remove_file(&path);
-        assert!(!model_file_is_usable(&path));
+        assert!(!model_file_is_usable(&path, MIN_VALID_MODEL_BYTES));
 
         let mut file = File::create(&path).unwrap();
         file.write_all(b"partial").unwrap();
         drop(file);
-        assert!(!model_file_is_usable(&path));
+        assert!(!model_file_is_usable(&path, MIN_VALID_MODEL_BYTES));
         let _ = fs::remove_file(path);
     }
 
@@ -276,7 +290,7 @@ mod model_file_tests {
         let file = File::create(&path).unwrap();
         file.set_len(MIN_VALID_MODEL_BYTES).unwrap();
         drop(file);
-        assert!(model_file_is_usable(&path));
+        assert!(model_file_is_usable(&path, MIN_VALID_MODEL_BYTES));
         let _ = fs::remove_file(path);
     }
 }

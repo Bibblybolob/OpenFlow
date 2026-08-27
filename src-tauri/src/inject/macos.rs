@@ -2,8 +2,6 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-use arboard::Clipboard;
-
 extern "C" {
     fn AXIsProcessTrusted() -> i32;
 
@@ -79,6 +77,57 @@ pub fn frontmost_app() -> String {
         .unwrap_or_default()
 }
 
+/// Brings an already-running app to the foreground by bundle identifier.
+/// History re-paste calls this before synthesizing Cmd+V; without the focus
+/// handoff, clicking the Hub action simply pasted back into FlowClone.
+pub fn focus_app(identifier: &str) -> Result<(), String> {
+    let identifier = identifier.trim();
+    if identifier.is_empty() || identifier == "com.flowclone.app" {
+        return Err("the original target app is unknown".to_string());
+    }
+
+    // Pass the identifier as argv rather than interpolating it into the
+    // script. Transcript metadata originates from the OS, but it should
+    // never become executable AppleScript text if a database is edited.
+    let script = r#"
+        on run argv
+            set targetId to item 1 of argv
+            tell application "System Events"
+                set matches to application processes whose bundle identifier is targetId
+                if (count of matches) is 0 then return "missing"
+                set frontmost of item 1 of matches to true
+            end tell
+            return "ok"
+        end run
+    "#;
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .arg("--")
+        .arg(identifier)
+        .output()
+        .map_err(|error| format!("failed to focus the original app: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to focus the original app: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if String::from_utf8_lossy(&output.stdout).trim() != "ok" {
+        return Err("the original target app is no longer running".to_string());
+    }
+
+    // Application activation is asynchronous. Confirm the handoff before
+    // posting Cmd+V so a slow app cannot redirect the paste into the Hub.
+    for _ in 0..10 {
+        thread::sleep(Duration::from_millis(25));
+        if frontmost_app() == identifier {
+            return Ok(());
+        }
+    }
+    Err("the original target app did not accept focus".to_string())
+}
+
 /// Reads up to ~400 characters immediately before the caret in the focused
 /// element, so cleanup can make dictation continue the surrounding sentence
 /// coherently. Best-effort: empty string whenever the frontmost app doesn't
@@ -95,9 +144,9 @@ pub fn preceding_context() -> String {
         end tell
         set caretLoc to (first item of selRange) as integer
         if caretLoc is 0 or length of docText is 0 then return ""
-        set maxStart to caretLoc - 400
+        set maxStart to caretLoc - 399
         if maxStart < 1 then set maxStart to 1
-        return text maxStart thru (caretLoc - 1) of docText
+        return text maxStart thru caretLoc of docText
     "#;
     Command::new("osascript")
         .arg("-e")
@@ -124,41 +173,30 @@ pub fn paste_text(text: &str) -> Result<(), String> {
         );
     }
 
-    let mut clipboard = Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
-    let previous = clipboard.get_text().ok();
-
-    clipboard
-        .set_text(text.to_string())
-        .map_err(|e| format!("failed to stage clipboard: {e}"))?;
+    let restore_generation = super::stage_clipboard_text(text)?;
 
     // Give the pasteboard a beat to settle before the target app reads it.
     thread::sleep(Duration::from_millis(40));
 
-    if !post_cmd_v() {
+    let paste_result = if !post_cmd_v() {
         let script = r#"tell application "System Events" to keystroke "v" using command down"#;
-        let output = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .map_err(|e| format!("failed to run osascript: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
+        match Command::new("osascript").arg("-e").arg(script).output() {
+            Ok(output) if output.status.success() => Ok(()),
+            Ok(output) => Err(format!(
                 "keystroke failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
-            ));
+            )),
+            Err(error) => Err(format!("failed to run osascript: {error}")),
         }
+    } else {
+        Ok(())
+    };
+    if paste_result.is_ok() {
+        super::restore_clipboard_later(restore_generation);
+    } else {
+        super::keep_staged_clipboard(restore_generation);
     }
-
-    // Restore the user's clipboard after the pasted app has consumed it.
-    if let Some(previous) = previous {
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(800));
-            if let Ok(mut cb) = Clipboard::new() {
-                let _ = cb.set_text(previous);
-            }
-        });
-    }
-    Ok(())
+    paste_result
 }
 
 /// Posts Cmd+V key-down/key-up via CoreGraphics. Returns false when event

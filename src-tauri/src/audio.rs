@@ -212,7 +212,9 @@ impl AudioEngine {
             .default_input_config()
             .map_err(|e| AudioError::Stream(e.to_string()))?;
         let sample_rate = config.sample_rate().0;
+        let channels = config.channels() as usize;
         let format = config.sample_format();
+        let stream_config: cpal::StreamConfig = config.clone().into();
 
         let shared = Arc::clone(&self.shared);
         {
@@ -230,36 +232,36 @@ impl AudioEngine {
 
         let stream = match format {
             cpal::SampleFormat::F32 => device.build_input_stream(
-                &config.into(),
+                &stream_config,
                 move |data: &[f32], _| {
-                    push_levelled(&shared, &cb_a, vad_mult, data.iter().copied(), data.len())
+                    push_levelled(&shared, &cb_a, vad_mult, data.iter().copied(), channels)
                 },
                 err_fn,
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
-                &config.into(),
+                &stream_config,
                 move |data: &[i16], _| {
                     push_levelled(
                         &shared,
                         &cb_b,
                         vad_mult,
                         data.iter().map(|&s| s.to_sample::<f32>()),
-                        data.len(),
+                        channels,
                     )
                 },
                 err_fn,
                 None,
             ),
             cpal::SampleFormat::U16 => device.build_input_stream(
-                &config.into(),
+                &stream_config,
                 move |data: &[u16], _| {
                     push_levelled(
                         &shared,
                         &cb_c,
                         vad_mult,
                         data.iter().map(|&s| s.to_sample::<f32>()),
-                        data.len(),
+                        channels,
                     )
                 },
                 err_fn,
@@ -306,6 +308,11 @@ impl AudioEngine {
 
         self.discard_note = None;
 
+        // Preserve a true pre-processing peak for the hallucination guard.
+        // The conditioned signal below is intentionally amplified, so using
+        // its peak made near-silent captures look clearly voiced.
+        let raw_max_frame_rms = max_frame_rms(&samples, capture_rate);
+
         // Stage 0 — loudness normalization: lift quiet captures into the
         // range every downstream stage was trained on.
         let samples = normalize_loudness(samples);
@@ -346,7 +353,7 @@ impl AudioEngine {
         Ok(Some(Recording {
             duration_ms: elapsed_ms,
             wav,
-            max_frame_rms: regions.max_rms,
+            max_frame_rms: raw_max_frame_rms,
         }))
     }
 
@@ -384,17 +391,49 @@ impl AudioEngine {
             .default_input_config()
             .map_err(|e| AudioError::Stream(e.to_string()))?;
         let format = config.sample_format();
-        let err_fn = |e: cpal::StreamError| eprintln!("audio probe error: {e}");
+        let received = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stream_error = Arc::new(Mutex::new(None::<String>));
+        let error_slot = Arc::clone(&stream_error);
+        let err_fn = move |e: cpal::StreamError| {
+            eprintln!("audio probe error: {e}");
+            if let Ok(mut error) = error_slot.lock() {
+                *error = Some(e.to_string());
+            }
+        };
+        let received_f32 = Arc::clone(&received);
+        let received_i16 = Arc::clone(&received);
+        let received_u16 = Arc::clone(&received);
         let stream = match format {
-            cpal::SampleFormat::F32 => {
-                device.build_input_stream(&config.into(), |_: &[f32], _| {}, err_fn, None)
-            }
-            cpal::SampleFormat::I16 => {
-                device.build_input_stream(&config.into(), |_: &[i16], _| {}, err_fn, None)
-            }
-            cpal::SampleFormat::U16 => {
-                device.build_input_stream(&config.into(), |_: &[u16], _| {}, err_fn, None)
-            }
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    if !data.is_empty() {
+                        received_f32.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    if !data.is_empty() {
+                        received_i16.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[u16], _| {
+                    if !data.is_empty() {
+                        received_u16.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                },
+                err_fn,
+                None,
+            ),
             other => {
                 return Err(AudioError::Stream(format!(
                     "unsupported sample format: {other}"
@@ -405,8 +444,16 @@ impl AudioEngine {
         stream
             .play()
             .map_err(|e| AudioError::Stream(e.to_string()))?;
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(200));
         drop(stream);
+        if let Some(error) = stream_error.lock().ok().and_then(|mut error| error.take()) {
+            return Err(AudioError::Stream(error));
+        }
+        if !received.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AudioError::Stream(
+                "input stream opened but delivered no audio frames".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -416,12 +463,12 @@ fn push_levelled(
     level_cb: &Option<Arc<dyn Fn(f32, bool) + Send + Sync>>,
     vad_mult: f32,
     iter: impl Iterator<Item = f32>,
-    frame_count: usize,
+    channels: usize,
 ) {
     let mut s = shared.lock().unwrap();
-    s.samples.extend(iter);
+    let start = s.samples.len();
+    append_downmixed(&mut s.samples, iter, channels);
     if let Some(cb) = level_cb {
-        let start = s.samples.len().saturating_sub(frame_count);
         let recent = &s.samples[start..];
         let rms = (recent.iter().map(|x| x * x).sum::<f32>() / recent.len().max(1) as f32).sqrt();
         s.env = rms.max(s.env * ENV_DECAY);
@@ -429,6 +476,41 @@ fn push_levelled(
         let voiced = is_voiced(s.floor, rms, vad_mult);
         cb((s.env / BAR_FULL_SCALE).min(1.0), voiced);
     }
+}
+
+/// CPAL input buffers are interleaved by channel. Whisper expects mono, so
+/// average each frame before metering and storage instead of treating L/R as
+/// consecutive points in time (which doubled duration and distorted audio on
+/// stereo microphones).
+fn append_downmixed(output: &mut Vec<f32>, iter: impl Iterator<Item = f32>, channels: usize) {
+    let channels = channels.max(1);
+    if channels == 1 {
+        output.extend(iter);
+        return;
+    }
+
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for sample in iter {
+        sum += sample;
+        count += 1;
+        if count == channels {
+            output.push(sum / channels as f32);
+            sum = 0.0;
+            count = 0;
+        }
+    }
+}
+
+fn max_frame_rms(samples: &[f32], sample_rate: u32) -> f32 {
+    let frame_len = ((sample_rate as f32 * 0.02) as usize).max(1);
+    samples
+        .chunks(frame_len)
+        .filter(|frame| !frame.is_empty())
+        .map(|frame| {
+            (frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32).sqrt()
+        })
+        .fold(0.0f32, f32::max)
 }
 
 /// Adaptive voice-isolation gate. Tracks the recording's own noise floor
@@ -658,6 +740,26 @@ mod tests {
             .collect();
         assert_eq!(decoded.len(), samples.len());
         assert!((decoded[0] - samples[0]).abs() < 0.001);
+    }
+
+    #[test]
+    fn interleaved_stereo_is_downmixed_to_one_sample_per_frame() {
+        let mut mono = Vec::new();
+        append_downmixed(
+            &mut mono,
+            [1.0, -1.0, 0.25, 0.75, -0.5, -0.25].into_iter(),
+            2,
+        );
+        assert_eq!(mono, vec![0.0, 0.5, -0.375]);
+    }
+
+    #[test]
+    fn raw_peak_meter_is_not_changed_by_loudness_normalization() {
+        let quiet = vec![0.001f32; 48_000];
+        let raw_peak = max_frame_rms(&quiet, 48_000);
+        let normalized = normalize_loudness(quiet);
+        assert!(raw_peak < 0.02);
+        assert!(max_frame_rms(&normalized, 48_000) > raw_peak * 10.0);
     }
 
     #[test]

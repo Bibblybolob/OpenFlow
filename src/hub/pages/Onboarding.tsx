@@ -32,6 +32,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [inputMonitoring, setInputMonitoring] = useState<CheckState>({ status: "pending" });
   const [mic, setMic] = useState<CheckState>({ status: "pending" });
   const [hotkey, setHotkey] = useState<string[]>([]);
+  const [toggleMode, setToggleMode] = useState(true);
   const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState("base");
   const [modelDownload, setModelDownload] = useState<string | null>(null);
@@ -40,7 +41,11 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
 
   useEffect(() => {
     api.getHotkey().then(setHotkey).catch(() => setHotkey(["Right Shift"]));
-    api.setFlowbarVisible(false);
+    api
+      .getSetting<string>("hotkeyMode")
+      .then((mode) => setToggleMode(mode !== "push_to_talk"))
+      .catch(() => {});
+    api.setFlowbarVisible(false).catch(() => {});
   }, []);
 
   const runChecks = useCallback(async () => {
@@ -83,22 +88,25 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const refreshModels = useCallback(async () => {
     setModelError(null);
     try {
-      const models = await api.localModelStatus();
+      const [models, configured] = await Promise.all([
+        api.localModelStatus(),
+        api.getSetting<string>("sttLocalModel"),
+      ]);
       setLocalModels(models);
-      const configured = models.find((model) => model.id === selectedModel);
-      if (!configured && models.length > 0) setSelectedModel(models[0].id);
+      const selected = models.find((model) => model.id === configured);
+      if (selected) setSelectedModel(selected.id);
+      else if (models.length > 0) setSelectedModel(models[0].id);
     } catch (error) {
       setModelError(readableError(error));
     }
-  }, [selectedModel]);
+  }, []);
 
   useEffect(() => {
     if (step === "model") refreshModels();
   }, [refreshModels, step]);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<ModelProgressPayload>("local-model-progress", (event) => {
+    const unlisten = listen<ModelProgressPayload>("local-model-progress", (event) => {
       const payload = event.payload;
       if (payload.type === "done") {
         setModelDownload(null);
@@ -117,8 +125,10 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
       setModelDownload(
         `${payload.downloadedMb} MB${payload.totalMb ? `/${payload.totalMb} MB` : ""}`,
       );
-    }).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+    });
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   useEffect(() => {
@@ -212,7 +222,11 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
         )}
 
         {step === "hotkey" && (
-          <HotkeyTest hotkey={hotkey.join(" + ")} onSkip={() => finish(true)} />
+          <HotkeyTest
+            hotkey={hotkey.join(" + ")}
+            toggleMode={toggleMode}
+            onSkip={() => finish(true)}
+          />
         )}
       </motion.div>
     </div>
@@ -265,6 +279,7 @@ function ModelSetup({
                   name="onboarding-model"
                   checked={selectedModel === model.id}
                   onChange={() => onChoose(model.id)}
+                  disabled={downloadStatus !== null}
                   className="accent-indigo-400"
                 />
                 <span className="min-w-0">
@@ -316,7 +331,7 @@ function ModelSetup({
           <span>{error}</span>
           <button
             type="button"
-            onClick={models.length > 0 ? onDownload : onRefresh}
+            onClick={onRefresh}
             className="shrink-0 text-red-200 underline underline-offset-2 hover:text-white"
           >
             Retry
@@ -346,7 +361,7 @@ function Welcome({ onNext }: { onNext: () => void }) {
       </div>
       <h1 className="text-xl font-semibold text-white">Welcome to OpenFlow</h1>
       <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-neutral-400">
-        Hold the dictation hotkey and speak naturally — ramble, pause, or
+        Use the dictation hotkey and speak naturally — ramble, pause, or
         change your mind mid-sentence. Flow understands what you mean, edits
         as you speak, and polished text appears wherever your cursor is:
         filler words removed, punctuation added, writing formatted.
@@ -437,7 +452,7 @@ function Permissions({
         />
         <CheckRow
           title="Microphone"
-          subtitle="Captures your voice while the hotkey is held"
+          subtitle="Captures your voice only while dictation is active"
           state={mic}
           action={
             mic.status === "failed" ? (
@@ -478,21 +493,25 @@ function Permissions({
 
 function HotkeyTest({
   hotkey,
+  toggleMode,
   onSkip,
 }: {
   hotkey: string;
+  toggleMode: boolean;
   onSkip: () => void;
 }) {
   return (
     <div className="text-center">
       <h1 className="text-xl font-semibold text-white">Try it out</h1>
       <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-neutral-400">
-        Click into any text field, hold{" "}
+        Click into any text field, press{" "}
         <kbd className="rounded-md border border-white/15 bg-white/[0.06] px-2 py-0.5 font-mono text-xs text-neutral-200">
           {hotkey}
         </kbd>{" "}
-        and say hello. Your words will be pasted when you release — and we'll
-        finish setup automatically.
+        {toggleMode
+          ? "to start, say hello, then press it again to finish."
+          : "and hold it while you say hello, then release to finish."}{" "}
+        Your words will be pasted and we'll finish setup automatically.
       </p>
       <div className="mx-auto mt-6 flex h-16 max-w-xs items-center justify-center rounded-xl border border-dashed border-white/15">
         <span className="animate-pulse text-xs text-neutral-500">

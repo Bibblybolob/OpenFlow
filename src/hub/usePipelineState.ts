@@ -22,32 +22,36 @@ export function usePipelineState() {
   const [state, setState] = useState<PipelineState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [warningSerial, setWarningSerial] = useState(0);
   const [lastTranscriptId, setLastTranscriptId] = useState<number | null>(null);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<PipelineEvent>("pipeline", (e) => {
+    const unlisten = listen<PipelineEvent>("pipeline", (e) => {
       const ev = e.payload;
       setState(ev.type);
       setError(ev.error ?? null);
       if (ev.transcript) setLastTranscriptId(ev.transcript.id);
-    }).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+    });
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<PipelineWarningEvent>("pipeline-warning", (e) => {
+    const unlisten = listen<PipelineWarningEvent>("pipeline-warning", (e) => {
       setWarning(e.payload.message);
-    }).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+      setWarningSerial((serial) => serial + 1);
+    });
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   useEffect(() => {
     if (!warning) return;
     const timer = setTimeout(() => setWarning(null), 8000);
     return () => clearTimeout(timer);
-  }, [warning]);
+  }, [warning, warningSerial]);
 
   return { state, error, warning, lastTranscriptId };
 }

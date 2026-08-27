@@ -113,6 +113,10 @@ fn load_recognizer() -> Result<std::sync::Arc<OfflineRecognizer>> {
 /// Downloads and validates the official Parakeet int8 archive.
 pub fn download_model(app: &AppHandle) -> Result<PathBuf> {
     if is_downloaded() {
+        let _ = app.emit(
+            "local-parakeet-progress",
+            serde_json::json!({ "type": "done", "model": MODEL_ID }),
+        );
         return Ok(model_dir());
     }
 
@@ -156,7 +160,8 @@ fn download_model_inner(app: &AppHandle) -> Result<PathBuf> {
             )));
         }
 
-        let total = response.content_length().unwrap_or(0);
+        let expected_size = response.content_length();
+        let total = expected_size.unwrap_or(0);
         let mut output = File::create(&archive_path)?;
         let mut downloaded = 0usize;
         let mut last_emit_mb = 0u64;
@@ -185,7 +190,16 @@ fn download_model_inner(app: &AppHandle) -> Result<PathBuf> {
             }
         }
         output.flush()?;
+        let archive_size = output
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         drop(output);
+        if archive_size == 0 || expected_size.is_some_and(|expected| archive_size != expected) {
+            return Err(StoreError::Other(
+                "Parakeet download looks truncated — please retry".to_string(),
+            ));
+        }
 
         let archive_file = File::open(&archive_path)?;
         extract_archive(BzDecoder::new(archive_file), &staging_dir)?;

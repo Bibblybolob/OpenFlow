@@ -43,6 +43,7 @@ fn play_blocking(chime: Chime) {
         Chime::Stop => &[(880.0, 0.055), (587.33, 0.085)],
     };
     let sample_rate = config.sample_rate().0;
+    let channels = usize::from(config.channels().max(1));
     let samples = render(segments, sample_rate);
     let total_len = samples.len();
 
@@ -56,10 +57,13 @@ fn play_blocking(chime: Chime) {
                     &config.into(),
                     move |data: &mut [$ty], _: &cpal::OutputCallbackInfo| {
                         let (samples, cursor) = &*shared;
-                        let start = cursor.fetch_add(data.len(), Ordering::Relaxed);
-                        for (i, frame) in data.iter_mut().enumerate() {
+                        let frame_count = data.len().div_ceil(channels);
+                        let start = cursor.fetch_add(frame_count, Ordering::Relaxed);
+                        for (i, frame) in data.chunks_mut(channels).enumerate() {
                             let v = samples.get(start + i).copied().unwrap_or(0.0);
-                            *frame = $conv(v);
+                            for sample in frame {
+                                *sample = $conv(v);
+                            }
                         }
                     },
                     err_fn,
