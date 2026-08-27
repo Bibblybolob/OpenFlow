@@ -396,32 +396,24 @@ fn paste_text_at_cursor(_state: tauri::State<AppState>, text: String) -> Result<
 }
 
 #[tauri::command]
-fn retry_last(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<bool, String> {
+fn retry_last(state: tauri::State<AppState>) -> Result<bool, String> {
     let Some(job) = PENDING_RETRY
         .lock()
         .map_err(|_| "lock poisoned".to_string())?
-        .take()
+        .clone()
     else {
         return Ok(false);
     };
-    let db = Arc::clone(&state.db);
-    let fsm = state.pipeline.state_handle();
-    std::thread::spawn(move || {
-        pipeline::run_session(
-            &app,
-            &db,
-            &fsm,
-            crate::audio::Recording {
-                duration_ms: 0,
-                wav: job.wav,
-                // Retried jobs predate per-session metering; treat as
-                // clearly-voiced so the artifact guard never eats a retry.
-                max_frame_rms: 1.0,
-            },
-            job.target_app,
-        );
-    });
-    Ok(true)
+    Ok(state.pipeline.retry(
+        crate::audio::Recording {
+            duration_ms: 0,
+            wav: job.wav,
+            // Retried jobs predate per-session metering; treat as
+            // clearly-voiced so the artifact guard never eats a retry.
+            max_frame_rms: 1.0,
+        },
+        job.target_app,
+    ))
 }
 
 #[tauri::command]
@@ -524,6 +516,44 @@ fn local_model_status() -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// Reports whether the optional Parakeet model bundle is available. The
+/// command remains registered in standard builds so the frontend can probe
+/// capability without knowing which Cargo features produced the binary.
+#[tauri::command]
+fn local_parakeet_status() -> serde_json::Value {
+    #[cfg(feature = "parakeet")]
+    {
+        serde_json::json!({
+            "id": cloud::local_parakeet::MODEL_ID,
+            "available": true,
+            "downloaded": cloud::local_parakeet::is_downloaded(),
+        })
+    }
+    #[cfg(not(feature = "parakeet"))]
+    {
+        serde_json::json!({
+            "id": "parakeet-tdt-0.6b-v3",
+            "available": false,
+            "downloaded": false,
+        })
+    }
+}
+
+#[tauri::command]
+fn download_local_parakeet(app: tauri::AppHandle) -> store::Result<String> {
+    #[cfg(feature = "parakeet")]
+    {
+        cloud::local_parakeet::download_model(&app).map(|path| path.to_string_lossy().into_owned())
+    }
+    #[cfg(not(feature = "parakeet"))]
+    {
+        let _ = app;
+        Err(store::StoreError::Other(
+            "Parakeet support is not enabled in this build".to_string(),
+        ))
+    }
 }
 
 /// Downloads an on-device model, streaming progress to the Hub. Runs on its
@@ -674,23 +704,38 @@ fn set_flowbar_preset(
         .map_err(|e| store::StoreError::Other(e.to_string()))?
         .ok_or_else(|| store::StoreError::Other("no primary monitor".to_string()))?;
     let scale = monitor.scale_factor();
+    let monitor_position = monitor.position();
     let screen = monitor.size();
-    let bar_w = FLOWBAR_SIZE.0 * scale;
-    let bar_h = FLOWBAR_SIZE.1 * scale;
+    let window_size = window
+        .inner_size()
+        .map_err(|e| store::StoreError::Other(e.to_string()))?;
+    let bar_w = window_size.width as f64;
+    let bar_h = window_size.height as f64;
     let margin = 24.0 * scale;
+    let origin_x = monitor_position.x as f64;
+    let origin_y = monitor_position.y as f64;
 
     let (x, y) = match preset.as_str() {
-        "top_left" => (margin, margin),
-        "top_center" => ((screen.width as f64 - bar_w) / 2.0, margin),
-        "top_right" => (screen.width as f64 - bar_w - margin, margin),
-        "bottom_left" => (margin, screen.height as f64 - bar_h - margin),
+        "top_left" => (origin_x + margin, origin_y + margin),
+        "top_center" => (
+            origin_x + (screen.width as f64 - bar_w) / 2.0,
+            origin_y + margin,
+        ),
+        "top_right" => (
+            origin_x + screen.width as f64 - bar_w - margin,
+            origin_y + margin,
+        ),
+        "bottom_left" => (
+            origin_x + margin,
+            origin_y + screen.height as f64 - bar_h - margin,
+        ),
         "bottom_center" => (
-            (screen.width as f64 - bar_w) / 2.0,
-            screen.height as f64 - bar_h - margin,
+            origin_x + (screen.width as f64 - bar_w) / 2.0,
+            origin_y + screen.height as f64 - bar_h - margin,
         ),
         "bottom_right" => (
-            screen.width as f64 - bar_w - margin,
-            screen.height as f64 - bar_h - margin,
+            origin_x + screen.width as f64 - bar_w - margin,
+            origin_y + screen.height as f64 - bar_h - margin,
         ),
         other => {
             return Err(store::StoreError::Other(format!(
@@ -698,7 +743,6 @@ fn set_flowbar_preset(
             )))
         }
     };
-    let (x, y) = (x.max(0.0), y.max(0.0));
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|e| store::StoreError::Other(e.to_string()))?;
@@ -995,7 +1039,9 @@ pub fn run() {
             open_accessibility_settings,
             open_input_monitoring_settings,
             local_model_status,
+            local_parakeet_status,
             download_local_model,
+            download_local_parakeet,
             set_local_model,
             local_llm_status,
             app_version,

@@ -74,17 +74,6 @@ export default function Home() {
     );
   }
 
-  async function addSample() {
-    await api.insertTranscript({
-      text: "This is a sample dictation to verify the pipeline.",
-      rawText: "um this is a uh sample dictation to like verify the pipeline",
-      language: "en",
-      durationMs: 3200,
-      targetApp: "FlowClone",
-    });
-    refresh();
-  }
-
   async function onDelete(id: number) {
     await api.deleteTranscript(id);
     refresh();
@@ -135,12 +124,6 @@ export default function Home() {
 
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Home</h1>
-        <button
-          onClick={addSample}
-          className="rounded-lg bg-indigo-500/90 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-indigo-500"
-        >
-          Add sample dictation
-        </button>
       </div>
 
       <div className="flex gap-4">

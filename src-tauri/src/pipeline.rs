@@ -159,6 +159,11 @@ enum Msg {
     Hotkey(HotkeyEvent),
     Cancel,
     PauseToggle,
+    Retry {
+        recording: crate::audio::Recording,
+        target_app: String,
+        reply: mpsc::Sender<bool>,
+    },
     /// Sent by the worker thread once post-processing (STT/LLM/inject)
     /// completes, so the hotkey handler can accept new dictations again.
     SessionDone,
@@ -170,6 +175,7 @@ enum Msg {
 
 pub struct Pipeline {
     state: Arc<AtomicU8>,
+    busy: Arc<std::sync::atomic::AtomicBool>,
     control_tx: mpsc::Sender<Msg>,
 }
 
@@ -184,6 +190,7 @@ impl Pipeline {
     ) -> Self {
         let (tx, rx) = mpsc::channel::<Msg>();
         let state = Arc::new(AtomicU8::new(PipelineState::Idle.as_u8()));
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let (hk_tx, hk_rx) = mpsc::channel::<HotkeyEvent>();
         {
@@ -234,16 +241,18 @@ impl Pipeline {
 
         {
             let state = Arc::clone(&state);
+            let busy = Arc::clone(&busy);
             let timer_tx = tx.clone();
             let metering = Metering {
                 mic_level,
                 mic_voiced,
             };
-            std::thread::spawn(move || handler_loop(app, db, rx, state, timer_tx, metering));
+            std::thread::spawn(move || handler_loop(app, db, rx, state, busy, timer_tx, metering));
         }
 
         Self {
             state,
+            busy,
             control_tx: tx,
         }
     }
@@ -276,9 +285,26 @@ impl Pipeline {
         let _ = self.control_tx.send(Msg::PauseToggle);
     }
 
-    /// Shared FSM atom for commands that re-enter the pipeline (retry).
-    pub(crate) fn state_handle(&self) -> Arc<AtomicU8> {
-        Arc::clone(&self.state)
+    /// Re-runs a failed transcription through the same serialized worker path
+    /// as a normal dictation. The reply is sent by the hotkey handler after it
+    /// has checked mode and busy state, so a retry cannot race a new session.
+    pub(crate) fn retry(&self, recording: crate::audio::Recording, target_app: String) -> bool {
+        if self.current() != PipelineState::Idle || self.busy.load(Ordering::Relaxed) {
+            return false;
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .control_tx
+            .send(Msg::Retry {
+                recording,
+                target_app,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        reply_rx.recv().unwrap_or(false)
     }
 
     /// Starts or finishes a recording (Flow Bar click).
@@ -382,15 +408,24 @@ fn clamp_flowbar_position(window: &tauri::WebviewWindow) {
         return;
     };
     let scale = monitor.scale_factor();
+    let monitor_position = monitor.position();
     let bounds = monitor.size();
-    let bar_w = crate::FLOWBAR_SIZE.0 * scale;
-    let bar_h = crate::FLOWBAR_SIZE.1 * scale;
+    // Flow Bar now fits its content dynamically. Use the actual physical
+    // window size here; the old fixed 240x52 bounds could strand a resized
+    // pill partly off-screen and also assumed every monitor began at (0, 0).
+    let Ok(window_size) = window.inner_size() else {
+        return;
+    };
+    let bar_w = window_size.width as f64;
+    let bar_h = window_size.height as f64;
     // A small margin keeps a sliver of the pill grabbable at the edges.
     let margin = 8.0 * scale;
-    let max_x = (bounds.width as f64 - bar_w - margin).max(0.0);
-    let max_y = (bounds.height as f64 - bar_h - margin).max(0.0);
-    let x = (outer.x as f64).clamp(margin, max_x.max(margin));
-    let y = (outer.y as f64).clamp(margin, max_y.max(margin));
+    let min_x = monitor_position.x as f64 + margin;
+    let min_y = monitor_position.y as f64 + margin;
+    let max_x = (monitor_position.x as f64 + bounds.width as f64 - bar_w - margin).max(min_x);
+    let max_y = (monitor_position.y as f64 + bounds.height as f64 - bar_h - margin).max(min_y);
+    let x = (outer.x as f64).clamp(min_x, max_x);
+    let y = (outer.y as f64).clamp(min_y, max_y);
     if (x - outer.x as f64).abs() > 1.0 || (y - outer.y as f64).abs() > 1.0 {
         let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
     }
@@ -408,6 +443,32 @@ enum Mode {
     HandsFree,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TapAction {
+    Wait,
+    Finish,
+    EnterHandsFree,
+}
+
+fn classify_tap_up(
+    pending_tap: bool,
+    second_tap_down: bool,
+    first_tap_elapsed_ms: Option<u64>,
+) -> TapAction {
+    if pending_tap
+        && second_tap_down
+        && first_tap_elapsed_ms
+            .map(|elapsed| elapsed < DOUBLE_TAP_WINDOW_MS)
+            .unwrap_or(false)
+    {
+        TapAction::EnterHandsFree
+    } else if pending_tap || second_tap_down {
+        TapAction::Finish
+    } else {
+        TapAction::Wait
+    }
+}
+
 /// Tail parameters shared with the capture callback plumbing.
 struct Metering {
     mic_level: Arc<std::sync::atomic::AtomicU32>,
@@ -419,6 +480,7 @@ fn handler_loop(
     db: Arc<Store>,
     rx: mpsc::Receiver<Msg>,
     state: Arc<AtomicU8>,
+    busy: Arc<std::sync::atomic::AtomicBool>,
     timer_tx: mpsc::Sender<Msg>,
     metering: Metering,
 ) {
@@ -427,10 +489,10 @@ fn handler_loop(
     let mut mode = Mode::Idle;
     let mut pending_tap = false;
     let mut first_tap_at: Option<Instant> = None;
+    let mut second_tap_down = false;
     // True while a worker thread is post-processing a finished recording.
     // The hotkey handler stays responsive during that window and queues one
     // start request instead of blocking like the old synchronous flow.
-    let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut pending_start = false;
     let mut last_esc_at: Option<Instant> = None;
     // Shared with the level callback (last audible input) and a generation
@@ -494,6 +556,7 @@ fn handler_loop(
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
+                    second_tap_down = false;
                     continue;
                 }
                 if mode == Mode::Idle {
@@ -521,6 +584,7 @@ fn handler_loop(
                     crate::begin_context_capture();
                     mode = Mode::Ptt;
                     pending_tap = false;
+                    second_tap_down = false;
                     session_gen.fetch_add(1, Ordering::Relaxed);
                     spawn_max_session_timer(&timer_tx);
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
@@ -528,8 +592,20 @@ fn handler_loop(
                 // Down while Ptt (second press of entering double-tap) or
                 // HandsFree (exit press): keep recording; release decides.
                 if pending_tap {
-                    pending_tap = false;
-                    first_tap_at = None;
+                    // Keep the first tap pending until the second release.
+                    // Clearing it on key-down made the subsequent TapUp look
+                    // like another first tap, so double-tap could never win.
+                    second_tap_down = true;
+                    if !first_tap_at
+                        .map(|t| t.elapsed() < Duration::from_millis(DOUBLE_TAP_WINDOW_MS))
+                        .unwrap_or(false)
+                    {
+                        // The second press missed the double-tap window. It
+                        // is still a real press, so its eventual release
+                        // should finish the active session normally.
+                        pending_tap = false;
+                        first_tap_at = None;
+                    }
                 }
             }
             Msg::Hotkey(HotkeyEvent::Up) => {
@@ -552,6 +628,7 @@ fn handler_loop(
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
+                    second_tap_down = false;
                 } else if pending_start {
                     // Released before the queued start fired — the user let
                     // go, so nothing should begin. This kills the ghost
@@ -566,63 +643,77 @@ fn handler_loop(
                 // Toggle activation: releases carry no meaning.
                 _ if hotkey_is_toggle(&db) => {}
                 Mode::Ptt => {
-                    let confirmed_double = pending_tap
-                        && first_tap_at
-                            .map(|t| t.elapsed() < Duration::from_millis(DOUBLE_TAP_WINDOW_MS))
-                            .unwrap_or(false);
-                    if !pending_tap {
-                        // First quick tap: hold judgement briefly in case a
-                        // second tap follows, then finish automatically.
-                        pending_tap = true;
-                        first_tap_at = Some(Instant::now());
-                        spawn_tap_judge(&timer_tx);
-                    } else if confirmed_double {
-                        // Double-tap confirmed: restart capture cleanly and
-                        // go hands-free.
-                        audio.discard();
-                        current_app = inject::frontmost_app();
-                        audio.set_device(mic_preference(&db));
-                        audio.set_processing(
-                            noise_suppression_enabled(&db),
-                            vad_sensitivity_mult(&db),
-                        );
-                        crate::begin_context_capture();
-                        if let Err(e) = audio.start() {
-                            fail(&app, &db, &state, format!("microphone unavailable: {e}"));
-                            mode = Mode::Idle;
-                        } else {
-                            mode = Mode::HandsFree;
-                            pending_tap = false;
-                            last_voice_ms.store(unix_ms(), Ordering::Relaxed);
-                            if crate::sound::enabled(&db) {
-                                crate::sound::play(crate::sound::Chime::Start);
-                            }
-                            emit_warning(&app, "hands-free: speak freely — Esc stops".to_string());
-                            let gen = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                            spawn_handsfree_watchdog(
-                                &timer_tx,
-                                Arc::clone(&last_voice_ms),
-                                Arc::clone(&session_gen),
-                                gen,
-                            );
-                            spawn_max_session_timer(&timer_tx);
+                    match classify_tap_up(
+                        pending_tap,
+                        second_tap_down,
+                        first_tap_at.map(|t| t.elapsed().as_millis() as u64),
+                    ) {
+                        TapAction::Wait => {
+                            // First quick tap: hold judgement briefly in case
+                            // a second tap follows, then finish automatically.
+                            pending_tap = true;
+                            first_tap_at = Some(Instant::now());
+                            spawn_tap_judge(&timer_tx);
                         }
-                    } else {
-                        // Second tap came too late for double-tap — judge
-                        // this as an ordinary quick release and stop.
-                        session_gen.fetch_add(1, Ordering::Relaxed);
-                        finish_session(
-                            &app,
-                            &db,
-                            &state,
-                            &mut audio,
-                            &mut current_app,
-                            &busy,
-                            &timer_tx,
-                        );
-                        mode = Mode::Idle;
-                        pending_tap = false;
-                        first_tap_at = None;
+                        TapAction::EnterHandsFree => {
+                            // Double-tap confirmed: restart capture cleanly and
+                            // go hands-free.
+                            audio.discard();
+                            current_app = inject::frontmost_app();
+                            audio.set_device(mic_preference(&db));
+                            audio.set_processing(
+                                noise_suppression_enabled(&db),
+                                vad_sensitivity_mult(&db),
+                            );
+                            crate::begin_context_capture();
+                            if let Err(e) = audio.start() {
+                                fail(&app, &db, &state, format!("microphone unavailable: {e}"));
+                                mode = Mode::Idle;
+                                pending_tap = false;
+                                first_tap_at = None;
+                                second_tap_down = false;
+                            } else {
+                                mode = Mode::HandsFree;
+                                pending_tap = false;
+                                first_tap_at = None;
+                                second_tap_down = false;
+                                last_voice_ms.store(unix_ms(), Ordering::Relaxed);
+                                if crate::sound::enabled(&db) {
+                                    crate::sound::play(crate::sound::Chime::Start);
+                                }
+                                emit_warning(
+                                    &app,
+                                    "hands-free: speak freely — Esc stops".to_string(),
+                                );
+                                let gen = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
+                                spawn_handsfree_watchdog(
+                                    &timer_tx,
+                                    Arc::clone(&last_voice_ms),
+                                    Arc::clone(&session_gen),
+                                    gen,
+                                );
+                                spawn_max_session_timer(&timer_tx);
+                            }
+                        }
+                        TapAction::Finish => {
+                            // The second tap came too late for double-tap, or
+                            // the pending first tap timed out. Finish like a
+                            // normal quick release.
+                            session_gen.fetch_add(1, Ordering::Relaxed);
+                            finish_session(
+                                &app,
+                                &db,
+                                &state,
+                                &mut audio,
+                                &mut current_app,
+                                &busy,
+                                &timer_tx,
+                            );
+                            mode = Mode::Idle;
+                            pending_tap = false;
+                            first_tap_at = None;
+                            second_tap_down = false;
+                        }
                     }
                 }
                 Mode::HandsFree => {
@@ -639,6 +730,7 @@ fn handler_loop(
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
+                    second_tap_down = false;
                 }
                 Mode::Idle => {}
             },
@@ -650,6 +742,7 @@ fn handler_loop(
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
+                    second_tap_down = false;
                     pending_start = false;
                     transition(&app, &db, &state, PipelineState::Idle, None, None);
                 } else {
@@ -681,6 +774,9 @@ fn handler_loop(
                     } else {
                         audio.pause();
                         session_gen.fetch_add(1, Ordering::Relaxed);
+                        pending_tap = false;
+                        first_tap_at = None;
+                        second_tap_down = false;
                         transition(&app, &db, &state, PipelineState::Paused, None, None);
                     }
                 }
@@ -692,10 +788,24 @@ fn handler_loop(
                 pending_tap = false;
                 first_tap_at = None;
                 pending_start = false;
+                second_tap_down = false;
                 transition(&app, &db, &state, PipelineState::Idle, None, None);
             }
+            Msg::Retry {
+                recording,
+                target_app,
+                reply,
+            } => {
+                let accepted = mode == Mode::Idle && !busy.load(Ordering::Relaxed);
+                if accepted {
+                    spawn_session_worker(
+                        &app, &db, &state, recording, target_app, &busy, &timer_tx,
+                    );
+                }
+                let _ = reply.send(accepted);
+            }
             Msg::TapJudge => {
-                if pending_tap && mode == Mode::Ptt {
+                if pending_tap && !second_tap_down && mode == Mode::Ptt {
                     // No second tap arrived: treat as a normal release.
                     pending_tap = false;
                     first_tap_at = None;
@@ -710,6 +820,7 @@ fn handler_loop(
                         &timer_tx,
                     );
                     mode = Mode::Idle;
+                    second_tap_down = false;
                 }
             }
             Msg::SessionDone => {
@@ -727,6 +838,8 @@ fn handler_loop(
                     } else {
                         mode = Mode::Ptt;
                         pending_tap = false;
+                        first_tap_at = None;
+                        second_tap_down = false;
                         spawn_max_session_timer(&timer_tx);
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     }
@@ -784,32 +897,8 @@ fn finish_session(
 ) {
     match audio.stop() {
         Ok(Some(recording)) => {
-            // Hand the recording to a worker thread so the hotkey handler
-            // can keep reacting while STT/LLM/injection run.
-            busy.store(true, Ordering::Relaxed);
-            let worker_app = app.clone();
-            let worker_db = Arc::clone(db);
-            let worker_state = Arc::clone(state);
-            let done_tx = done_tx.clone();
             let target_app = std::mem::take(current_app);
-            std::thread::spawn(move || {
-                // SessionDone must be sent even if processing panics,
-                // otherwise the pipeline would stay busy forever.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_session(
-                        &worker_app,
-                        &worker_db,
-                        &worker_state,
-                        recording,
-                        target_app,
-                    );
-                }));
-                if result.is_err() {
-                    eprintln!("dictation worker panicked");
-                    set_state(&worker_state, PipelineState::Idle);
-                }
-                let _ = done_tx.send(Msg::SessionDone);
-            });
+            spawn_session_worker(app, db, state, recording, target_app, busy, done_tx);
         }
         Ok(None) => {
             if let Some(note) = audio.take_discard_note() {
@@ -819,6 +908,46 @@ fn finish_session(
         }
         Err(e) => fail(app, db, state, e.to_string()),
     }
+}
+
+fn spawn_session_worker(
+    app: &AppHandle,
+    db: &Arc<Store>,
+    state: &Arc<AtomicU8>,
+    recording: crate::audio::Recording,
+    target_app: String,
+    busy: &std::sync::atomic::AtomicBool,
+    done_tx: &mpsc::Sender<Msg>,
+) {
+    // Hand the recording to a worker thread so the hotkey handler can keep
+    // reacting while STT/LLM/injection run.
+    busy.store(true, Ordering::Relaxed);
+    let worker_app = app.clone();
+    let worker_db = Arc::clone(db);
+    let worker_state = Arc::clone(state);
+    let done_tx = done_tx.clone();
+    std::thread::spawn(move || {
+        // SessionDone must be sent even if processing panics, otherwise the
+        // pipeline would stay busy forever.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_session(
+                &worker_app,
+                &worker_db,
+                &worker_state,
+                recording,
+                target_app,
+            );
+        }));
+        if result.is_err() {
+            fail(
+                &worker_app,
+                &worker_db,
+                &worker_state,
+                "dictation worker panicked".to_string(),
+            );
+        }
+        let _ = done_tx.send(Msg::SessionDone);
+    });
 }
 
 /// Accumulates per-stage wall-clock durations for one dictation and reports
@@ -1163,5 +1292,18 @@ mod tests {
         // energy gate passes it through with more content.
         assert!(!is_whisper_artifact("thank you for the quick review"));
         assert!(!is_whisper_artifact("bye everyone, see you tomorrow"));
+    }
+
+    #[test]
+    fn double_tap_requires_second_press_before_release() {
+        assert_eq!(
+            classify_tap_up(true, true, Some(DOUBLE_TAP_WINDOW_MS - 1)),
+            TapAction::EnterHandsFree
+        );
+        assert_eq!(
+            classify_tap_up(true, true, Some(DOUBLE_TAP_WINDOW_MS)),
+            TapAction::Finish
+        );
+        assert_eq!(classify_tap_up(false, false, None), TapAction::Wait);
     }
 }

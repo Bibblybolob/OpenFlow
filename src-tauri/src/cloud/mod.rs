@@ -1,5 +1,7 @@
 pub mod llm;
 pub mod local_llm;
+#[cfg(feature = "parakeet")]
+pub mod local_parakeet;
 pub mod local_stt;
 pub mod stt;
 

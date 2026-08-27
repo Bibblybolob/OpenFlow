@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 
 export type Page = "home" | "dictionary" | "snippets" | "style" | "settings";
 
@@ -47,6 +48,12 @@ export default function Sidebar({
   page: Page;
   onNavigate: (p: Page) => void;
 }) {
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {});
+  }, []);
+
   return (
     <nav className="flex w-52 shrink-0 flex-col border-r border-white/5 bg-white/[0.02] p-4">
       <div className="mb-8 flex items-center gap-2 px-2 pt-2">
@@ -78,7 +85,9 @@ export default function Sidebar({
           </button>
         ))}
       </div>
-      <div className="mt-auto px-3 text-xs text-neutral-700">v0.1.0 · M1</div>
+      <div className="mt-auto px-3 text-xs text-neutral-700">
+        {version ? `v${version}` : ""}
+      </div>
     </nav>
   );
 }

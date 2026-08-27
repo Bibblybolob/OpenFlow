@@ -72,7 +72,6 @@ const ENV_DECAY: f32 = 0.86;
 /// Below this absolute RMS nothing counts as voice, whatever the floor.
 const VOICED_ABS_MIN: f32 = 0.006;
 /// Voice must clear the tracked floor by this multiple.
-const VOICED_FLOOR_MULT: f32 = 2.0;
 /// Floor growth per callback: ~0.0001/s — minutes to drift up, so long
 /// takes never sag. Hard cap keeps noisy rooms from eating the gate.
 const FLOOR_RISE: f32 = 0.000004;
@@ -86,8 +85,8 @@ fn next_floor(floor: f32, rms: f32) -> f32 {
     }
 }
 
-fn is_voiced(floor: f32, rms: f32) -> bool {
-    rms > VOICED_ABS_MIN && rms > floor * VOICED_FLOOR_MULT
+fn is_voiced(floor: f32, rms: f32, vad_mult: f32) -> bool {
+    rms > VOICED_ABS_MIN && rms > floor * vad_mult
 }
 
 /// A finished dictation capture, ready for upload.
@@ -225,12 +224,15 @@ impl AudioEngine {
         let cb_a = self.on_level.clone();
         let cb_b = self.on_level.clone();
         let cb_c = self.on_level.clone();
+        // Capture the per-session setting in the callback. The live meter
+        // drives the same sensitivity users selected for the offline gate.
+        let vad_mult = self.vad_mult;
 
         let stream = match format {
             cpal::SampleFormat::F32 => device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
-                    push_levelled(&shared, &cb_a, data.iter().copied(), data.len())
+                    push_levelled(&shared, &cb_a, vad_mult, data.iter().copied(), data.len())
                 },
                 err_fn,
                 None,
@@ -241,6 +243,7 @@ impl AudioEngine {
                     push_levelled(
                         &shared,
                         &cb_b,
+                        vad_mult,
                         data.iter().map(|&s| s.to_sample::<f32>()),
                         data.len(),
                     )
@@ -254,6 +257,7 @@ impl AudioEngine {
                     push_levelled(
                         &shared,
                         &cb_c,
+                        vad_mult,
                         data.iter().map(|&s| s.to_sample::<f32>()),
                         data.len(),
                     )
@@ -410,6 +414,7 @@ impl AudioEngine {
 fn push_levelled(
     shared: &Arc<Mutex<Shared>>,
     level_cb: &Option<Arc<dyn Fn(f32, bool) + Send + Sync>>,
+    vad_mult: f32,
     iter: impl Iterator<Item = f32>,
     frame_count: usize,
 ) {
@@ -421,7 +426,7 @@ fn push_levelled(
         let rms = (recent.iter().map(|x| x * x).sum::<f32>() / recent.len().max(1) as f32).sqrt();
         s.env = rms.max(s.env * ENV_DECAY);
         s.floor = next_floor(s.floor, rms);
-        let voiced = is_voiced(s.floor, rms);
+        let voiced = is_voiced(s.floor, rms, vad_mult);
         cb((s.env / BAR_FULL_SCALE).min(1.0), voiced);
     }
 }
@@ -853,12 +858,30 @@ mod tests {
 
     #[test]
     fn voiced_needs_floor_clearance_or_absolute_minimum() {
-        assert!(!is_voiced(0.02, 0.005), "below absolute min");
-        assert!(!is_voiced(0.02, 0.04), "inside the floor margin");
-        assert!(is_voiced(0.02, 0.06));
+        assert!(!is_voiced(0.02, 0.005, VAD_MULT_LOW), "below absolute min");
+        assert!(
+            !is_voiced(0.02, 0.04, VAD_MULT_LOW),
+            "inside the floor margin"
+        );
+        assert!(is_voiced(0.02, 0.06, VAD_MULT_LOW));
         // Capped floor keeps very noisy rooms honest.
-        assert!(!is_voiced(FLOOR_CAP, FLOOR_CAP * VOICED_FLOOR_MULT * 0.9));
-        assert!(is_voiced(FLOOR_CAP, FLOOR_CAP * VOICED_FLOOR_MULT * 1.2));
+        assert!(!is_voiced(
+            FLOOR_CAP,
+            FLOOR_CAP * VAD_MULT_LOW * 0.9,
+            VAD_MULT_LOW
+        ));
+        assert!(is_voiced(
+            FLOOR_CAP,
+            FLOOR_CAP * VAD_MULT_LOW * 1.2,
+            VAD_MULT_LOW
+        ));
+    }
+
+    #[test]
+    fn voiced_threshold_tracks_sensitivity() {
+        let rms = 0.031;
+        assert!(is_voiced(0.01, rms, VAD_MULT_LOW));
+        assert!(!is_voiced(0.01, rms, VAD_MULT_HIGH));
     }
 
     #[test]

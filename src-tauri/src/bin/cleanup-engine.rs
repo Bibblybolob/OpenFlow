@@ -13,7 +13,7 @@
 //! The process stays alive so the model loads once and serves every
 //! dictation; the app kills it on quit.
 
-use std::io::{BufRead as _, Write as _};
+use std::io::Write as _;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -33,7 +33,7 @@ static ENGINE: OnceLock<std::sync::Mutex<Engine>> = OnceLock::new();
 
 fn engine() -> &'static std::sync::Mutex<Engine> {
     ENGINE.get_or_init(|| {
-        let mut backend = LlamaBackend::init().expect("backend init failed");
+        let backend = LlamaBackend::init().expect("backend init failed");
         // Route llama.cpp logs through the safe tracing bridge instead of
         // the default stderr printer (which has crashed in some builds).
         // The sidecar's own diagnostics go to stderr below.
@@ -133,7 +133,7 @@ fn handle_cleanup(req: &serde_json::Value) -> Result<serde_json::Value, String> 
         .and_then(|v| v.as_str())
         .ok_or("missing prompt")?;
 
-    let mut guard = engine().lock().map_err(|e| e.to_string())?;
+    let guard = engine().lock().map_err(|e| e.to_string())?;
     let model = guard.model.as_ref().ok_or("no model loaded")?;
 
     let tokens = model

@@ -203,11 +203,15 @@ impl Store {
     }
 
     pub fn search_transcripts(&self, query: &str) -> Result<Vec<Transcript>> {
-        let pattern = format!("%{}%", query);
+        let escaped = query
+            .replace('!', "!!")
+            .replace('%', "!%")
+            .replace('_', "!_");
+        let pattern = format!("%{}%", escaped);
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, raw_text, language, duration_ms, word_count, target_app, flagged, created_at
-             FROM transcripts WHERE text LIKE ?1 OR raw_text LIKE ?1
+             FROM transcripts WHERE text LIKE ?1 ESCAPE '!' OR raw_text LIKE ?1 ESCAPE '!'
              ORDER BY created_at DESC, id DESC LIMIT 200",
         )?;
         let rows = stmt.query_map(params![pattern], map_transcript)?;
@@ -279,21 +283,32 @@ impl Store {
         term: &str,
         replacement: Option<&str>,
     ) -> Result<DictionaryEntry> {
+        let term = term.trim().to_string();
+        if term.is_empty() {
+            return Err(StoreError::Other(
+                "dictionary term cannot be empty".to_string(),
+            ));
+        }
         let starred = 0;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO dictionary (term, replacement, starred) VALUES (?1, ?2, ?3)
              ON CONFLICT(term) DO UPDATE SET replacement = excluded.replacement",
-            params![term.trim(), replacement, starred],
+            params![term, replacement, starred],
         )?;
-        let id = conn.last_insert_rowid();
-        Ok(DictionaryEntry {
-            id,
-            term: term.trim().to_string(),
-            replacement: replacement.map(str::to_string),
-            starred: false,
-            created_at: now_iso(&conn)?,
-        })
+        Ok(conn.query_row(
+            "SELECT id, term, replacement, starred, created_at FROM dictionary WHERE term = ?1",
+            params![term],
+            |row| {
+                Ok(DictionaryEntry {
+                    id: row.get(0)?,
+                    term: row.get(1)?,
+                    replacement: row.get(2)?,
+                    starred: row.get::<_, i64>(3)? != 0,
+                    created_at: row.get(4)?,
+                })
+            },
+        )?)
     }
 
     pub fn list_dictionary(&self) -> Result<Vec<DictionaryEntry>> {
@@ -427,19 +442,30 @@ impl Store {
     }
 
     pub fn add_snippet(&self, trigger: &str, body: &str) -> Result<Snippet> {
+        let trigger = trigger.trim().to_string();
+        if trigger.is_empty() {
+            return Err(StoreError::Other(
+                "snippet trigger cannot be empty".to_string(),
+            ));
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO snippets (trigger, body) VALUES (?1, ?2)
              ON CONFLICT(trigger) DO UPDATE SET body = excluded.body",
-            params![trigger.trim(), body],
+            params![trigger, body],
         )?;
-        let id = conn.last_insert_rowid();
-        Ok(Snippet {
-            id,
-            trigger: trigger.trim().to_string(),
-            body: body.to_string(),
-            created_at: now_iso(&conn)?,
-        })
+        Ok(conn.query_row(
+            "SELECT id, trigger, body, created_at FROM snippets WHERE trigger = ?1",
+            params![trigger],
+            |row| {
+                Ok(Snippet {
+                    id: row.get(0)?,
+                    trigger: row.get(1)?,
+                    body: row.get(2)?,
+                    created_at: row.get(3)?,
+                })
+            },
+        )?)
     }
 
     pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
@@ -472,24 +498,26 @@ impl Store {
         instructions: &str,
         language: Option<&str>,
     ) -> Result<Style> {
+        let app_pattern = app_pattern.trim().to_lowercase();
+        if app_pattern.is_empty() {
+            return Err(StoreError::Other(
+                "style app pattern cannot be empty".to_string(),
+            ));
+        }
         let language = language.map(str::to_string);
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO styles (app_pattern, label, instructions, language) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(app_pattern) DO UPDATE SET label = excluded.label,
                  instructions = excluded.instructions, language = excluded.language",
-            params![app_pattern.trim().to_lowercase(), label, instructions, language],
+            params![app_pattern, label, instructions, language],
         )?;
-        let id = conn.last_insert_rowid();
-        Ok(Style {
-            id,
-            app_pattern: app_pattern.trim().to_lowercase(),
-            label: label.to_string(),
-            instructions: instructions.to_string(),
-            language,
-            enabled: true,
-            created_at: now_iso(&conn)?,
-        })
+        Ok(conn.query_row(
+            "SELECT id, app_pattern, label, instructions, enabled, created_at, language
+             FROM styles WHERE app_pattern = ?1",
+            params![app_pattern],
+            map_style,
+        )?)
     }
 
     pub fn list_styles(&self) -> Result<Vec<Style>> {
@@ -695,25 +723,34 @@ mod tests {
     #[test]
     fn dictionary_upsert_on_conflict() {
         let store = memory_store();
-        store.add_dictionary_term("kubernetes", None).unwrap();
+        let first = store.add_dictionary_term("kubernetes", None).unwrap();
         store
             .add_dictionary_term("kubernetes", Some("Kubernetes"))
             .unwrap();
         let list = store.list_dictionary().unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, first.id);
         assert_eq!(list[0].replacement.as_deref(), Some("Kubernetes"));
     }
 
     #[test]
     fn snippet_upsert_on_conflict() {
         let store = memory_store();
-        store.add_snippet("my email", "jon@example.com").unwrap();
-        store
+        let first = store.add_snippet("my email", "jon@example.com").unwrap();
+        store.add_snippet("other", "other body").unwrap();
+        let updated = store
             .add_snippet("my email", "jonathan@example.com")
             .unwrap();
         let list = store.list_snippets().unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].body, "jonathan@example.com");
+        assert_eq!(list.len(), 2);
+        assert_eq!(updated.id, first.id);
+        assert_eq!(
+            list.iter()
+                .find(|snippet| snippet.id == first.id)
+                .unwrap()
+                .body,
+            "jonathan@example.com"
+        );
     }
 
     #[test]
@@ -778,6 +815,34 @@ mod tests {
             .resolve_style_full("com.apple.mail")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn style_upsert_returns_existing_id_and_enabled_state() {
+        let store = memory_store();
+        let first = store.upsert_style("mail", "Mail", "Formal", None).unwrap();
+        store.set_style_enabled(first.id, false).unwrap();
+        let updated = store
+            .upsert_style(" MAIL ", "Mail updated", "Concise", Some("en"))
+            .unwrap();
+        assert_eq!(updated.id, first.id);
+        assert!(!updated.enabled);
+        assert_eq!(updated.app_pattern, "mail");
+        assert_eq!(updated.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn search_treats_like_wildcards_as_literal_text() {
+        let store = memory_store();
+        store
+            .insert_transcript("100% complete", "", "en", 500, "")
+            .unwrap();
+        store
+            .insert_transcript("1000 complete", "", "en", 500, "")
+            .unwrap();
+        let matches = store.search_transcripts("100%").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].text, "100% complete");
     }
 
     #[test]

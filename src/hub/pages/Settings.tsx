@@ -25,6 +25,12 @@ interface LocalModelInfo {
   downloaded: boolean;
 }
 
+interface LocalParakeetStatus {
+  id: string;
+  available: boolean;
+  downloaded: boolean;
+}
+
 export default function Settings({
   onRerunSetup,
 }: {
@@ -35,6 +41,17 @@ export default function Settings({
   const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
   const [localModel, setLocalModel] = useState("base");
   const [localDownload, setLocalDownload] = useState<string | null>(null);
+  const [localEngine, setLocalEngine] = useState<"whisper" | "parakeet">(
+    "whisper",
+  );
+  const [parakeetStatus, setParakeetStatus] = useState<LocalParakeetStatus>({
+    id: "parakeet-tdt-0.6b-v3",
+    available: false,
+    downloaded: false,
+  });
+  const [parakeetDownload, setParakeetDownload] = useState<string | null>(
+    null,
+  );
   const [cleanupEnabled, setCleanupEnabled] = useState(true);
   const [skipShort, setSkipShort] = useState(true);
   const [localLlms, setLocalLlms] = useState<LocalModelInfo[]>([]);
@@ -96,8 +113,36 @@ export default function Settings({
           api.localModelStatus().then(setLocalModels).catch(() => {});
           return;
         }
+        if (payload.type === "error") {
+          setLocalDownload(null);
+          return;
+        }
         setLocalDownload(
           `${payload.model}: ${payload.downloadedMb}/${payload.totalMb} MB`,
+        );
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<ModelProgressPayload>(
+      "local-parakeet-progress",
+      (event) => {
+        const payload = event.payload;
+        if (payload.type === "done") {
+          setParakeetDownload(null);
+          api.localParakeetStatus().then(setParakeetStatus).catch(() => {});
+          return;
+        }
+        if (payload.type === "error") {
+          setParakeetDownload(null);
+          return;
+        }
+        setParakeetDownload(
+          `${payload.downloadedMb}/${payload.totalMb} MB`,
         );
       },
     );
@@ -137,8 +182,17 @@ export default function Settings({
     const cm = await api.getSetting<boolean>("commandMode");
     const ce = await api.getSetting<boolean>("cleanupEnabled");
     const ss = await api.getSetting<boolean>("cleanupSkipShort");
+    const le = await api.getSetting<string>("sttLocalEngine");
     const lm = await api.getSetting<string>("sttLocalModel");
     const lms = await api.localModelStatus().catch(() => [] as LocalModelInfo[]);
+    const ps = await api.localParakeetStatus().catch(
+      () =>
+        ({
+          id: "parakeet-tdt-0.6b-v3",
+          available: false,
+          downloaded: false,
+        }) as LocalParakeetStatus,
+    );
     const llmId = await api.getSetting<string>("llmLocalModel");
     const llms = await api.localLlmStatus().catch(() => [] as LocalModelInfo[]);
     const style = await loadPillStyle();
@@ -157,13 +211,15 @@ export default function Settings({
     setCommandMode(cm ?? true);
     setCleanupEnabled(ce ?? true);
     setSkipShort(ss ?? true);
+    setLocalEngine(le === "parakeet" ? "parakeet" : "whisper");
     setLocalModel(lm ?? "base");
     setLocalModels(lms);
+    setParakeetStatus(ps);
     setLocalLlm(llmId ?? "qwen3-4b");
     setLocalLlms(llms);
     setPillStyle(style);
     setAccessibility(await invokeAccessibility());
-    setInputMonitoring(await api.inputMonitoringStatus().catch(() => true));
+    setInputMonitoring(await api.inputMonitoringStatus().catch(() => false));
   }
 
   useEffect(() => {
@@ -241,12 +297,38 @@ export default function Settings({
       await api.setLocalModel(id);
       const info = localModels.find((m) => m.id === id);
       if (info && !info.downloaded) {
-        setLocalDownload(`${id}: starting…`);
-        await api.downloadLocalModel(id);
+        await downloadLocalModel(id);
       }
     } catch (e) {
       console.error(e);
       setLocalDownload(null);
+    }
+  }
+
+  async function downloadLocalModel(id: string) {
+    if (localDownload?.startsWith(`${id}:`)) return;
+    setLocalDownload(`${id}: starting…`);
+    try {
+      await api.downloadLocalModel(id);
+    } catch (e) {
+      console.error(e);
+      setLocalDownload(null);
+    }
+  }
+
+  async function changeLocalEngine(engine: "whisper" | "parakeet") {
+    if (engine === "parakeet" && !parakeetStatus.available) return;
+    try {
+      if (engine === "parakeet" && !parakeetStatus.downloaded) {
+        setParakeetDownload("starting…");
+        await api.downloadLocalParakeet();
+        setParakeetStatus((current) => ({ ...current, downloaded: true }));
+      }
+      await api.setSetting("sttLocalEngine", engine);
+      setLocalEngine(engine);
+    } catch (e) {
+      console.error(e);
+      setParakeetDownload(null);
     }
   }
 
@@ -502,16 +584,40 @@ export default function Settings({
         <h2 className="text-xs font-medium tracking-wider text-neutral-500 uppercase">
           Transcription
         </h2>
-        <div className="flex gap-2">
-          <div className="w-48 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-neutral-300">
-            On-device (whisper.cpp)
+        <div className="flex items-center gap-3">
+          <div className="flex rounded-lg border border-white/10 bg-white/[0.04] p-1">
+            <button
+              type="button"
+              onClick={() => changeLocalEngine("whisper")}
+              className={`rounded-md px-3 py-1.5 text-sm ${
+                localEngine === "whisper"
+                  ? "bg-white/10 text-white"
+                  : "text-neutral-500 hover:text-neutral-300"
+              }`}
+            >
+              Whisper
+            </button>
+            <button
+              type="button"
+              onClick={() => changeLocalEngine("parakeet")}
+              disabled={!parakeetStatus.available}
+              className={`rounded-md px-3 py-1.5 text-sm ${
+                localEngine === "parakeet"
+                  ? "bg-white/10 text-white"
+                  : "text-neutral-500 hover:text-neutral-300"
+              } disabled:cursor-not-allowed disabled:opacity-40`}
+            >
+              Parakeet
+            </button>
           </div>
           <p className="flex-1 self-center text-xs text-neutral-600">
-            Runs entirely offline — fastest and most private. First use
-            downloads the model.
+            {localEngine === "whisper"
+              ? "Runs entirely offline — choose a Whisper model below."
+              : "Runs entirely offline with Parakeet TDT; first use downloads its model bundle."}
           </p>
         </div>
-        <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+        {localEngine === "whisper" ? (
+          <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
             {localModels.map((m) => (
               <div key={m.id} className="flex items-center justify-between gap-4">
                 <label className="flex flex-1 items-center gap-3 text-sm">
@@ -529,20 +635,61 @@ export default function Settings({
                     </span>
                   )}
                 </label>
-                <span
-                  className={`shrink-0 text-xs ${
-                    m.downloaded ? "text-emerald-400" : "text-neutral-500"
-                  }`}
-                >
-                  {localDownload?.startsWith(`${m.id}:`)
-                    ? localDownload.split(": ", 2)[1] ?? "Downloading…"
-                    : m.downloaded
-                      ? "Ready"
-                      : "Not downloaded"}
-                </span>
+                <div className="flex shrink-0 items-center gap-3">
+                  <span
+                    className={`text-xs ${
+                      m.downloaded ? "text-emerald-400" : "text-neutral-500"
+                    }`}
+                  >
+                    {localDownload?.startsWith(`${m.id}:`)
+                      ? localDownload.split(": ", 2)[1] ?? "Downloading…"
+                      : m.downloaded
+                        ? "Ready"
+                        : "Not downloaded"}
+                  </span>
+                  {!m.downloaded && (
+                    <button
+                      type="button"
+                      onClick={() => downloadLocalModel(m.id)}
+                      disabled={localDownload?.startsWith(`${m.id}:`)}
+                      className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {localDownload?.startsWith(`${m.id}:`)
+                        ? "Downloading…"
+                        : "Download"}
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
+        ) : (
+          <div className="flex flex-col gap-1 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
+            <div className="flex items-center justify-between gap-4 text-sm">
+              <span className="text-neutral-300">Parakeet TDT 0.6B v3</span>
+              <span
+                className={
+                  parakeetStatus.downloaded
+                    ? "text-xs text-emerald-400"
+                    : "text-xs text-neutral-500"
+                }
+              >
+                {parakeetDownload ??
+                  (parakeetStatus.downloaded ? "Ready" : "Not downloaded")}
+              </span>
+            </div>
+            <p className="text-xs text-neutral-600">
+              ~300 MB download. Offline batch recognition; Whisper-only prompt
+              and language hints are not applied.
+            </p>
+          </div>
+        )}
+        {!parakeetStatus.available && (
+          <p className="text-xs text-neutral-600">
+            Parakeet is unavailable in this app build; Whisper remains the
+            default local engine.
+          </p>
+        )}
       </section>
 
       <section className="flex flex-col gap-2">
@@ -1004,7 +1151,7 @@ async function invokeAccessibility(): Promise<boolean> {
   try {
     return await api.accessibilityStatus();
   } catch {
-    return true;
+    return false;
   }
 }
 

@@ -13,6 +13,7 @@ interface CheckState {
 export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState<Step>("welcome");
   const [accessibility, setAccessibility] = useState<CheckState>({ status: "pending" });
+  const [inputMonitoring, setInputMonitoring] = useState<CheckState>({ status: "pending" });
   const [mic, setMic] = useState<CheckState>({ status: "pending" });
   const [hotkey, setHotkey] = useState<string[]>([]);
   const { lastTranscriptId } = usePipelineState();
@@ -24,14 +25,23 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
 
   const runChecks = useCallback(async () => {
     setAccessibility({ status: "checking" });
-    const ax = await api.accessibilityStatus();
+    setInputMonitoring({ status: "checking" });
+    const [ax, input] = await Promise.all([
+      api.accessibilityStatus().catch(() => false),
+      api.inputMonitoringStatus().catch(() => false),
+    ]);
     setAccessibility(
       ax
         ? { status: "ok" }
         : { status: "failed", message: "Grant Accessibility in System Settings, then re-check." },
     );
+    setInputMonitoring(
+      input
+        ? { status: "ok" }
+        : { status: "failed", message: "Grant Input Monitoring in System Settings, then re-check." },
+    );
 
-    if (!ax) {
+    if (!ax || !input) {
       setMic({ status: "pending" });
       return;
     }
@@ -92,11 +102,16 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
         {step === "permissions" && (
           <Permissions
             accessibility={accessibility}
+            inputMonitoring={inputMonitoring}
             mic={mic}
             onRecheck={runChecks}
             onOpenSettings={api.openAccessibilitySettings}
             onNext={() => setStep("hotkey")}
-            ready={accessibility.status === "ok" && mic.status === "ok"}
+            ready={
+              accessibility.status === "ok" &&
+              inputMonitoring.status === "ok" &&
+              mic.status === "ok"
+            }
           />
         )}
 
@@ -133,6 +148,7 @@ function Welcome({ onNext }: { onNext: () => void }) {
 
 function Permissions({
   accessibility,
+  inputMonitoring,
   mic,
   onRecheck,
   onOpenSettings,
@@ -140,6 +156,7 @@ function Permissions({
   ready,
 }: {
   accessibility: CheckState;
+  inputMonitoring: CheckState;
   mic: CheckState;
   onRecheck: () => void;
   onOpenSettings: () => void;
@@ -159,13 +176,36 @@ function Permissions({
       <div className="mt-6 flex flex-col gap-3">
         <CheckRow
           title="Accessibility"
-          subtitle="Global hotkey + pasting into any app"
+          subtitle="Pastes text into any app"
           state={accessibility}
           action={
             accessibility.status === "failed" ? (
               <div className="flex gap-2">
                 <button
                   onClick={onOpenSettings}
+                  className="rounded-md bg-indigo-500/20 px-2.5 py-1 text-xs text-indigo-300 hover:bg-indigo-500/30"
+                >
+                  System Settings
+                </button>
+                <button
+                  onClick={onRecheck}
+                  className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/5"
+                >
+                  Re-check
+                </button>
+              </div>
+            ) : null
+          }
+        />
+        <CheckRow
+          title="Input Monitoring"
+          subtitle="Lets the global hotkey work in other apps"
+          state={inputMonitoring}
+          action={
+            inputMonitoring.status === "failed" ? (
+              <div className="flex gap-2">
+                <button
+                  onClick={api.openInputMonitoringSettings}
                   className="rounded-md bg-indigo-500/20 px-2.5 py-1 text-xs text-indigo-300 hover:bg-indigo-500/30"
                 >
                   System Settings

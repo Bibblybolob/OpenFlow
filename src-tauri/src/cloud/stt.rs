@@ -9,8 +9,8 @@ pub struct TranscriptionResult {
     pub raw_text: String,
 }
 
-/// On-device transcription via the whisper.cpp engine. `on_delta` fires once
-/// with the complete text (local inference has no partial stream).
+/// On-device transcription via the configured local engine. `on_delta` fires
+/// once with the complete text (local inference has no partial stream).
 pub fn stream_transcribe(
     db: &Store,
     wav_bytes: &[u8],

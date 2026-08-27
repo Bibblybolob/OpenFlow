@@ -49,6 +49,9 @@ llama-cpp-2 = { version = "0.1", optional = true }
 encoding_rs = { version = "0.8", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 tracing = { version = "0.1.44", optional = true }
+sherpa-onnx = { version = "1.13.6", optional = true }
+bzip2 = { version = "0.4", optional = true }
+tar = { version = "0.4", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -61,6 +64,7 @@ windows = { version = "0.62", features = [
 
 [features]
 engine = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:tracing-subscriber", "dep:tracing"]
+parakeet = ["dep:sherpa-onnx", "dep:bzip2", "dep:tar"]
 
 [profile.release]
 codegen-units = 1
@@ -70,4 +74,3 @@ codegen-units = 1
 lto = "thin"
 opt-level = "s"
 strip = true
-

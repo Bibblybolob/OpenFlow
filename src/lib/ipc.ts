@@ -171,6 +171,14 @@ export const api = {
   setLocalModel: (model: string) =>
     invoke<void>("set_local_model", { model }),
 
+  localParakeetStatus: () =>
+    invoke<{ id: string; available: boolean; downloaded: boolean }>(
+      "local_parakeet_status",
+    ),
+
+  downloadLocalParakeet: () =>
+    invoke<string>("download_local_parakeet"),
+
   localLlmStatus: () =>
     invoke<
       { id: string; label: string; approxMb: number; downloaded: boolean }[]

@@ -1,4 +1,5 @@
-//! On-device transcription via whisper.cpp. Models are quantized ggml files
+//! On-device transcription via the Whisper engine, with an optional Parakeet
+//! engine selected at runtime. Whisper models are quantized ggml files
 //! downloaded once from the official whisper.cpp Hugging Face mirror; the
 //! loaded context is cached process-wide (model load dominates local
 //! latency, ~200-500ms) while each dictation gets a cheap fresh state.
@@ -95,6 +96,28 @@ pub fn resolve_model_id(db: &Store) -> String {
         .and_then(|v| serde_json::from_str::<String>(&v).ok())
         .filter(|m| LOCAL_MODELS.iter().any(|known| known.id == m))
         .unwrap_or_else(|| "base".to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalEngine {
+    Whisper,
+    Parakeet,
+}
+
+/// Resolves the local speech engine without making the optional Parakeet
+/// build the default. Unknown or malformed values intentionally fall back to
+/// Whisper so an older or partially migrated database remains usable.
+pub fn resolve_local_engine(db: &Store) -> LocalEngine {
+    match db
+        .get_setting("sttLocalEngine")
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<String>(&value).ok())
+        .as_deref()
+    {
+        Some("parakeet") => LocalEngine::Parakeet,
+        _ => LocalEngine::Whisper,
+    }
 }
 
 pub fn is_downloaded(model_id: &str) -> bool {
@@ -203,6 +226,30 @@ pub fn transcribe_local(
     language: &str,
     prompt: Option<&str>,
 ) -> Result<TranscriptionResult> {
+    match resolve_local_engine(db) {
+        LocalEngine::Whisper => transcribe_whisper(db, wav_bytes, language, prompt),
+        LocalEngine::Parakeet => {
+            #[cfg(feature = "parakeet")]
+            {
+                super::local_parakeet::transcribe_local(wav_bytes, language, prompt)
+            }
+            #[cfg(not(feature = "parakeet"))]
+            {
+                let _ = (wav_bytes, language, prompt);
+                Err(StoreError::Other(
+                    "Parakeet support is not enabled in this build".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn transcribe_whisper(
+    db: &Store,
+    wav_bytes: &[u8],
+    language: &str,
+    prompt: Option<&str>,
+) -> Result<TranscriptionResult> {
     let model_id = resolve_model_id(db);
     let path = model_path(&model_id);
     if !is_downloaded(&model_id) {
@@ -290,7 +337,7 @@ fn load_context(model_id: &str, path: &Path) -> Result<Arc<WhisperContext>> {
 }
 
 /// Decodes 16-bit PCM WAV bytes into f32 samples in [-1, 1].
-fn decode_wav_mono(wav_bytes: &[u8]) -> Result<Vec<f32>> {
+pub(crate) fn decode_wav_mono(wav_bytes: &[u8]) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::new(Cursor::new(wav_bytes))
         .map_err(|e| StoreError::Other(format!("bad audio capture: {e}")))?;
     Ok(reader
@@ -298,6 +345,20 @@ fn decode_wav_mono(wav_bytes: &[u8]) -> Result<Vec<f32>> {
         .filter_map(|s| s.ok())
         .map(|s| s as f32 / i16::MAX as f32)
         .collect())
+}
+
+#[test]
+fn local_engine_defaults_to_whisper_and_accepts_parakeet_setting() {
+    let db = Store::open(Path::new(":memory:")).unwrap();
+    assert_eq!(resolve_local_engine(&db), LocalEngine::Whisper);
+
+    db.set_setting("sttLocalEngine", &serde_json::json!("parakeet"))
+        .unwrap();
+    assert_eq!(resolve_local_engine(&db), LocalEngine::Parakeet);
+
+    db.set_setting("sttLocalEngine", &serde_json::json!("future-engine"))
+        .unwrap();
+    assert_eq!(resolve_local_engine(&db), LocalEngine::Whisper);
 }
 
 /// Manual hardware gate for a model: point FLOWCLONE_TURBO_TEST_WAV at a
@@ -346,9 +407,18 @@ fn turbo_model_transcribes_real_speech() {
     let started = std::time::Instant::now();
     let result = transcribe_local(&db, &wav, "en", None).expect("turbo transcription");
     eprintln!(
-        "turbo end-to-end in {:?}: {:?}",
+        "turbo cold end-to-end in {:?}: {:?}",
         started.elapsed(),
         result.text
     );
     assert!(!result.text.trim().is_empty(), "expected some transcript");
+
+    let started = std::time::Instant::now();
+    let warm_result = transcribe_local(&db, &wav, "en", None).expect("warm turbo transcription");
+    eprintln!(
+        "turbo warm end-to-end in {:?}: {:?}",
+        started.elapsed(),
+        warm_result.text
+    );
+    assert_eq!(warm_result.text, result.text);
 }
