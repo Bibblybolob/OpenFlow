@@ -55,6 +55,8 @@ export default function FlowBar() {
   const [state, setState] = useState<State>("idle");
   const [hasError, setHasError] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
+  const [hasWarning, setHasWarning] = useState(false);
+  const [warningText, setWarningText] = useState<string | null>(null);
   const [wave, setWave] = useState<number[]>(() =>
     new Array(WAVE_BARS).fill(0),
   );
@@ -151,6 +153,8 @@ export default function FlowBar() {
     hotkeyHint,
     overrideLabel,
     errorText,
+    warningText,
+    hasWarning,
     micSilent,
     styleMenuOpen,
     style,
@@ -164,6 +168,7 @@ export default function FlowBar() {
     if (rootEl) rootEl.style.background = "transparent";
 
     let unlistenPipeline: (() => void) | undefined;
+    let unlistenWarning: (() => void) | undefined;
     let unlistenStyle: (() => void) | undefined;
     let unlistenPartial: (() => void) | undefined;
     let pollId: ReturnType<typeof setInterval> | undefined;
@@ -187,6 +192,11 @@ export default function FlowBar() {
       setHasError(Boolean(e.payload.error));
       setErrorText(e.payload.error ?? null);
     }).then((fn) => (unlistenPipeline = fn));
+
+    listen<{ message: string }>("pipeline-warning", (e) => {
+      setWarningText(e.payload.message);
+      setHasWarning(true);
+    }).then((fn) => (unlistenWarning = fn));
 
     listen<{ text: string }>("stt-partial", (e) => {
       setPartial(e.payload.text);
@@ -247,6 +257,7 @@ export default function FlowBar() {
       clearInterval(pollId);
       clearTimeout(hideTimer.current);
       unlistenPipeline?.();
+      unlistenWarning?.();
       unlistenStyle?.();
       unlistenPartial?.();
       unMoved.then((fn) => fn());
@@ -259,10 +270,16 @@ export default function FlowBar() {
     return () => clearTimeout(timer);
   }, [hasError]);
 
+  useEffect(() => {
+    if (!hasWarning) return;
+    const timer = setTimeout(() => setHasWarning(false), 8000);
+    return () => clearTimeout(timer);
+  }, [hasWarning]);
+
   const recording = state === "recording";
   const paused = state === "paused";
   const busy = state === "transcribing" || state === "injecting";
-  const active = recording || paused || busy || hasError;
+  const active = recording || paused || busy || hasError || hasWarning;
   const accent = accentOf(style);
 
   // Waveform + silence detector, driven by polling the Rust-side level
@@ -381,15 +398,23 @@ export default function FlowBar() {
   }
 
   const radius = pillRadius(style.shape);
-  const mode = hasError && !recording ? "error" : recording || busy ? "active" : "idle";
+  const mode = hasError && !recording
+    ? "error"
+    : hasWarning && !recording
+      ? "warning"
+      : recording || busy
+        ? "active"
+        : "idle";
   const borderColor =
     mode === "error"
       ? rgba("#f87171", 0.5)
-      : mode === "active"
-        ? rgba(accent.border, 0.55)
-        : hovering
-          ? "rgba(255,255,255,0.22)"
-          : "rgba(255,255,255,0.12)";
+      : mode === "warning"
+        ? rgba("#fbbf24", 0.5)
+        : mode === "active"
+          ? rgba(accent.border, 0.55)
+          : hovering
+            ? "rgba(255,255,255,0.22)"
+            : "rgba(255,255,255,0.12)";
 
   const spring = style.animations
     ? { type: "spring" as const, stiffness: 420, damping: 28 }
@@ -581,12 +606,18 @@ export default function FlowBar() {
         ) : (
           <span
             className={`flex max-w-44 items-center gap-2 text-xs ${
-              hasError ? "text-red-300" : "text-neutral-500"
+              hasError
+                ? "text-red-300"
+                : hasWarning
+                  ? "text-amber-300"
+                  : "text-neutral-500"
             }`}
           >
             <span className="max-w-32 truncate">
               {hasError
                 ? (errorText ?? "Error — check Hub")
+                : hasWarning
+                  ? (warningText ?? "Warning — check Hub")
                 : overrideLabel
                   ? `Style: ${overrideLabel}`
                   : `${toggleMode ? "Press" : "Hold"} ${hotkeyHint} or click`}
@@ -618,6 +649,8 @@ export default function FlowBar() {
               ? { backgroundColor: "#f87171" }
               : hasError
                 ? { backgroundColor: "#f87171" }
+                : hasWarning
+                  ? { backgroundColor: "#fbbf24" }
                 : { backgroundColor: rgba(accent.base, 0.85) }
           }
         />

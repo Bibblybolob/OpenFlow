@@ -155,12 +155,17 @@ export function pillRadius(shape: PillShape): string {
 }
 
 export function pillBackground(
-  mode: "idle" | "active" | "error",
+  mode: "idle" | "active" | "warning" | "error",
   opacityPct: number,
 ): string {
   const alpha = Math.min(1, Math.max(0.4, opacityPct / 100));
   const base =
-    mode === "error" ? "#3d1116" : mode === "active" ? "#1a1a21" : "#131317";
+    mode === "error"
+      ? "#3d1116"
+      : mode === "warning"
+        ? "#3a2a0d"
+        : mode === "active"
+          ? "#1a1a21"
+          : "#131317";
   return rgba(base, alpha);
 }
-

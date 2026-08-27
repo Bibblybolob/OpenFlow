@@ -19,7 +19,7 @@ const LABELS: Record<string, string> = {
 export default function Hub() {
   const [page, setPage] = useState<Page>("home");
   const [onboarded, setOnboarded] = useState<boolean | null>(null);
-  const { state, error, lastTranscriptId } = usePipelineState();
+  const { state, error, warning, lastTranscriptId } = usePipelineState();
 
   useEffect(() => {
     api
@@ -45,6 +45,7 @@ export default function Hub() {
 
   let statusContent: ReactNode = LABELS[state];
   if (error) statusContent = <span className="text-red-400">{error}</span>;
+  else if (warning) statusContent = <span className="text-amber-300">{warning}</span>;
 
   return (
     <div className="relative flex h-screen overflow-hidden">
@@ -68,6 +69,8 @@ export default function Hub() {
         className={`pointer-events-none absolute right-6 bottom-5 rounded-full px-4 py-1.5 text-xs shadow-lg backdrop-blur transition-colors ${
           error
             ? "bg-red-500/15 text-red-300"
+            : warning
+              ? "bg-amber-500/15 text-amber-200"
             : state !== "idle"
               ? "bg-indigo-500/25 text-indigo-200"
               : "bg-white/[0.06] text-neutral-400"

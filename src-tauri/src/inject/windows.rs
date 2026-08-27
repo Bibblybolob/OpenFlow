@@ -4,8 +4,15 @@ use std::time::Duration;
 use arboard::Clipboard;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationTextPattern, TextPatternRangeEndpoint_Start,
+    TextUnit_Character, UIA_TextPatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
@@ -129,5 +136,71 @@ pub fn frontmost_app() -> String {
             .unwrap_or("")
             .trim_end_matches(".exe")
             .to_lowercase()
+    }
+}
+
+/// Reads up to 400 characters immediately before the caret from the focused
+/// UI Automation text element. Many Windows text controls expose this through
+/// TextPattern; unsupported controls simply return no context and cleanup
+/// continues without a hint.
+pub fn preceding_context() -> String {
+    unsafe {
+        if CoInitializeEx(None, COINIT_MULTITHREADED).is_err() {
+            return String::new();
+        }
+        let _com = ComGuard;
+
+        let automation: IUIAutomation =
+            match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
+                Ok(value) => value,
+                Err(_) => return String::new(),
+            };
+        let focused = match automation.GetFocusedElement() {
+            Ok(value) => value,
+            Err(_) => return String::new(),
+        };
+        let text_pattern: IUIAutomationTextPattern =
+            match focused.GetCurrentPatternAs(UIA_TextPatternId) {
+                Ok(value) => value,
+                Err(_) => return String::new(),
+            };
+        let selection = match text_pattern.GetSelection() {
+            Ok(value) => value,
+            Err(_) => return String::new(),
+        };
+        if selection
+            .Length()
+            .ok()
+            .filter(|length| *length > 0)
+            .is_none()
+        {
+            return String::new();
+        }
+        let range = match selection.GetElement(0) {
+            Ok(value) => value,
+            Err(_) => return String::new(),
+        };
+
+        // A selection's start is the insertion point for a collapsed caret.
+        // Moving only the start endpoint also gives sensible context when a
+        // user has selected text and is about to replace it.
+        if range
+            .MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -400)
+            .is_err()
+        {
+            return String::new();
+        }
+        range
+            .GetText(400)
+            .map(|text| text.to_string().trim().to_string())
+            .unwrap_or_default()
+    }
+}
+
+struct ComGuard;
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
     }
 }

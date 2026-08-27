@@ -8,6 +8,8 @@ interface HotkeyStatusEvent {
   detail?: string;
 }
 
+const TRANSCRIPT_PAGE_SIZE = 100;
+
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex-1 rounded-xl border border-white/5 bg-white/[0.03] px-5 py-4">
@@ -23,15 +25,22 @@ export default function Home() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
   const [query, setQuery] = useState("");
+  const [hasMore, setHasMore] = useState(false);
   const [watcher, setWatcher] = useState("waiting-permissions");
+
+  async function loadTranscripts(offset = 0, append = false) {
+    const page = await api.listTranscripts(TRANSCRIPT_PAGE_SIZE, offset);
+    setTranscripts((current) => (append ? [...current, ...page] : page));
+    setHasMore(page.length === TRANSCRIPT_PAGE_SIZE);
+  }
 
   async function refresh() {
     setStats(await api.stats());
-    setTranscripts(await api.listTranscripts(100));
+    await loadTranscripts();
   }
 
   useEffect(() => {
-    refresh();
+    refresh().catch(() => {});
     api
       .hotkeyWatcherStatus()
       .then(setWatcher)
@@ -80,25 +89,21 @@ export default function Home() {
 
   async function onSearch(q: string) {
     setQuery(q);
-    setTranscripts(
-      q.trim() ? await api.searchTranscripts(q) : await api.listTranscripts(100),
-    );
+    const results = q.trim()
+      ? await api.searchTranscripts(q)
+      : await api.listTranscripts(TRANSCRIPT_PAGE_SIZE);
+    setTranscripts(results);
+    setHasMore(!q.trim() && results.length === TRANSCRIPT_PAGE_SIZE);
   }
 
   async function onDelete(id: number) {
     await api.deleteTranscript(id);
-    refresh();
+    await refresh();
   }
 
   async function onCopy(text: string) {
     await navigator.clipboard.writeText(text);
   }
-
-  const visible = transcripts.filter((t) =>
-    query.trim()
-      ? true
-      : new Date(t.createdAt).toDateString() === new Date().toDateString(),
-  );
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
@@ -164,13 +169,13 @@ export default function Home() {
       />
 
       <div className="flex flex-col gap-3">
-        {visible.length === 0 && (
+        {transcripts.length === 0 && (
           <p className="text-sm text-neutral-600">
             No transcripts yet. Hold your hotkey and speak — history will appear
             here.
           </p>
         )}
-        {visible.map((t) => (
+        {transcripts.map((t) => (
           <div
             key={t.id}
             className="group flex items-start justify-between gap-4 rounded-xl border border-white/5 bg-white/[0.03] px-4 py-3"
@@ -211,6 +216,15 @@ export default function Home() {
             </div>
           </div>
         ))}
+        {hasMore && !query.trim() && (
+          <button
+            type="button"
+            onClick={() => loadTranscripts(transcripts.length, true)}
+            className="self-center rounded-lg border border-white/10 px-4 py-2 text-xs text-neutral-400 transition hover:bg-white/[0.05] hover:text-neutral-200"
+          >
+            Load older transcripts
+          </button>
+        )}
       </div>
     </div>
   );

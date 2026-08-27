@@ -14,9 +14,14 @@ export interface PipelineEvent {
   transcript?: { id: number; text: string };
 }
 
+interface PipelineWarningEvent {
+  message: string;
+}
+
 export function usePipelineState() {
   const [state, setState] = useState<PipelineState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [lastTranscriptId, setLastTranscriptId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -30,5 +35,19 @@ export function usePipelineState() {
     return () => unlisten?.();
   }, []);
 
-  return { state, error, lastTranscriptId };
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<PipelineWarningEvent>("pipeline-warning", (e) => {
+      setWarning(e.payload.message);
+    }).then((fn) => (unlisten = fn));
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    if (!warning) return;
+    const timer = setTimeout(() => setWarning(null), 8000);
+    return () => clearTimeout(timer);
+  }, [warning]);
+
+  return { state, error, warning, lastTranscriptId };
 }

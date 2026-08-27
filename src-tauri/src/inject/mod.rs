@@ -11,14 +11,9 @@ pub use macos::{
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{frontmost_app, is_accessibility_trusted, paste_text, undo_paste};
-
-/// Windows reads no caret context yet (UI Automation integration is future
-/// work); cleanup simply runs without a continuation hint.
-#[cfg(target_os = "windows")]
-pub fn preceding_context() -> String {
-    String::new()
-}
+pub use windows::{
+    frontmost_app, is_accessibility_trusted, paste_text, preceding_context, undo_paste,
+};
 
 /// Windows has no per-app gate on reading global key state.
 #[cfg(target_os = "windows")]
