@@ -3,6 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "../../lib/ipc";
 import type { Stats, Transcript } from "../../lib/types";
 
+interface HotkeyStatusEvent {
+  status: string;
+  detail?: string;
+}
+
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex-1 rounded-xl border border-white/5 bg-white/[0.03] px-5 py-4">
@@ -32,7 +37,7 @@ export default function Home() {
       .then(setWatcher)
       .catch(() => {});
     let unlisten: (() => void) | undefined;
-    listen<string>("hotkey-status", (e) => setWatcher(e.payload)).then(
+    listen<HotkeyStatusEvent>("hotkey-status", (e) => setWatcher(e.payload.status)).then(
       (fn) => (unlisten = fn),
     );
     return () => unlisten?.();
@@ -66,6 +71,12 @@ export default function Home() {
         };
     }
   })();
+  const permissionFix =
+    watcher === "waiting-accessibility"
+      ? api.openAccessibilitySettings
+      : watcher === "waiting-input-monitoring"
+        ? api.openInputMonitoringSettings
+        : null;
 
   async function onSearch(q: string) {
     setQuery(q);
@@ -92,14 +103,10 @@ export default function Home() {
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
       {!watcherReady && (
-        <button
-          onClick={() => {
-            (watcher === "waiting-accessibility"
-              ? api.openAccessibilitySettings()
-              : api.openInputMonitoringSettings()
-            ).catch(() => {});
-          }}
-          className="flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-left transition hover:bg-amber-500/[0.16]"
+        <div
+          className={`flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-left ${
+            permissionFix ? "transition hover:bg-amber-500/[0.16]" : ""
+          }`}
         >
           <span>
             <span className="block text-sm font-medium text-amber-200">
@@ -109,8 +116,16 @@ export default function Home() {
               {watcherBanner.detail}
             </span>
           </span>
-          <span className="text-xs font-medium text-amber-300">Fix →</span>
-        </button>
+          {permissionFix && (
+            <button
+              type="button"
+              onClick={() => permissionFix().catch(() => {})}
+              className="text-xs font-medium text-amber-300 hover:text-amber-100"
+            >
+              Fix →
+            </button>
+          )}
+        </div>
       )}
       <div className="rounded-xl border border-white/5 bg-gradient-to-br from-indigo-500/[0.07] to-violet-500/[0.04] px-5 py-4">
         <p className="text-sm font-medium text-neutral-100">Speak naturally</p>

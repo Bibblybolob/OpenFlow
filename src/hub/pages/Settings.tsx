@@ -189,6 +189,7 @@ export default function Settings({
 
   async function refresh() {
     const lang = (await api.getSetting<string>("language")) ?? "auto";
+    const preset = await api.getSetting<string>("flowBarPreset");
     const hk = await api.getHotkey().catch(() => ["Right Shift"]);
     const hkOptions = await api
       .hotkeyOptions()
@@ -220,6 +221,7 @@ export default function Settings({
     const style = await loadPillStyle();
 
     setLanguage(lang ?? "auto");
+    setFlowbarPreset(preset ?? "bottom_center");
     setHotkey(hk.length ? hk : ["Right Shift"]);
     setHotkeyOptions(hkOptions.length ? hkOptions : ["F1", "CapsLock", "Right Shift"]);
     setWatcherStatus(ws);

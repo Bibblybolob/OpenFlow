@@ -747,7 +747,8 @@ fn set_flowbar_preset(
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|e| store::StoreError::Other(e.to_string()))?;
     with_db(&state, |db| {
-        db.set_setting("flowBarPos", &serde_json::json!([x, y]))
+        db.set_setting("flowBarPos", &serde_json::json!([x, y]))?;
+        db.set_setting("flowBarPreset", &serde_json::json!(preset))
     })
 }
 
