@@ -62,6 +62,7 @@ fn catalog_model(model_id: &str) -> Option<&'static LocalModel> {
 }
 
 const MODEL_URL_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+const MIN_VALID_MODEL_BYTES: u64 = 1024 * 1024;
 static MODELS_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Cache of the loaded whisper context keyed by model id. Model loading is
 /// by far the slowest part of local transcription; reuse it across sessions.
@@ -121,7 +122,18 @@ pub fn resolve_local_engine(db: &Store) -> LocalEngine {
 }
 
 pub fn is_downloaded(model_id: &str) -> bool {
-    model_path(model_id).try_exists().unwrap_or(false)
+    model_file_is_usable(&model_path(model_id))
+}
+
+/// A zero-byte or tiny file can be left behind by a failed installer or a
+/// manually interrupted copy. Treat it as missing so the downloader can
+/// repair it instead of sending an opaque model-load error to transcription.
+fn model_file_is_usable(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.len() >= MIN_VALID_MODEL_BYTES)
+            .unwrap_or(false)
 }
 
 #[derive(Clone, Serialize)]
@@ -158,6 +170,11 @@ fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
     let dest = model_path(model_id);
     if is_downloaded(model_id) {
         return Ok(dest);
+    }
+    if dest.exists() {
+        // Windows cannot rename over an existing destination. Remove an
+        // invalid prior file before replacing it with the fresh download.
+        std::fs::remove_file(&dest)?;
     }
 
     let url = match catalog_model(model_id) {
@@ -210,12 +227,58 @@ fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
     file.flush()?;
     drop(file);
 
+    if std::fs::metadata(&partial)
+        .map(|metadata| metadata.len() < MIN_VALID_MODEL_BYTES)
+        .unwrap_or(true)
+    {
+        let _ = std::fs::remove_file(&partial);
+        return Err(StoreError::Other(
+            "downloaded file looks truncated — please retry".to_string(),
+        ));
+    }
+
     std::fs::rename(&partial, &dest)?;
     let _ = app.emit(
         "local-model-progress",
         serde_json::json!({ "type": "done", "model": model_id }),
     );
     Ok(dest)
+}
+
+#[cfg(test)]
+mod model_file_tests {
+    use super::{model_file_is_usable, MIN_VALID_MODEL_BYTES};
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("flowclone-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn tiny_or_missing_model_is_not_downloaded() {
+        let path = temp_path("tiny-model");
+        let _ = fs::remove_file(&path);
+        assert!(!model_file_is_usable(&path));
+
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"partial").unwrap();
+        drop(file);
+        assert!(!model_file_is_usable(&path));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sufficiently_sized_model_file_is_downloaded() {
+        let path = temp_path("valid-model");
+        let _ = fs::remove_file(&path);
+        let file = File::create(&path).unwrap();
+        file.set_len(MIN_VALID_MODEL_BYTES).unwrap();
+        drop(file);
+        assert!(model_file_is_usable(&path));
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// Transcribes WAV bytes on-device. Expects the mono 16 kHz PCM produced by

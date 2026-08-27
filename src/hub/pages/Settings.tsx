@@ -31,6 +31,11 @@ interface LocalParakeetStatus {
   downloaded: boolean;
 }
 
+interface DownloadError {
+  model: string;
+  message: string;
+}
+
 export default function Settings({
   onRerunSetup,
 }: {
@@ -41,6 +46,8 @@ export default function Settings({
   const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
   const [localModel, setLocalModel] = useState("base");
   const [localDownload, setLocalDownload] = useState<string | null>(null);
+  const [localDownloadError, setLocalDownloadError] =
+    useState<DownloadError | null>(null);
   const [localEngine, setLocalEngine] = useState<"whisper" | "parakeet">(
     "whisper",
   );
@@ -52,11 +59,15 @@ export default function Settings({
   const [parakeetDownload, setParakeetDownload] = useState<string | null>(
     null,
   );
+  const [parakeetDownloadError, setParakeetDownloadError] =
+    useState<string | null>(null);
   const [cleanupEnabled, setCleanupEnabled] = useState(true);
   const [skipShort, setSkipShort] = useState(true);
   const [localLlms, setLocalLlms] = useState<LocalModelInfo[]>([]);
   const [localLlm, setLocalLlm] = useState("qwen3-4b");
   const [llmDownload, setLlmDownload] = useState<string | null>(null);
+  const [llmDownloadError, setLlmDownloadError] =
+    useState<DownloadError | null>(null);
   const [language, setLanguage] = useState("auto");
   const [hotkey, setHotkey] = useState<string[]>(["Right Shift"]);
   const [hotkeyOptions, setHotkeyOptions] = useState<string[]>([
@@ -110,15 +121,21 @@ export default function Settings({
         const payload = event.payload;
         if (payload.type === "done") {
           setLocalDownload(null);
+          setLocalDownloadError(null);
           api.localModelStatus().then(setLocalModels).catch(() => {});
           return;
         }
         if (payload.type === "error") {
           setLocalDownload(null);
+          setLocalDownloadError({
+            model: payload.model,
+            message: payload.message ?? "The model download failed. Try again.",
+          });
           return;
         }
+        setLocalDownloadError(null);
         setLocalDownload(
-          `${payload.model}: ${payload.downloadedMb}/${payload.totalMb} MB`,
+          `${payload.model}: ${payload.downloadedMb} MB${payload.totalMb ? `/${payload.totalMb} MB` : ""}`,
         );
       },
     );
@@ -134,15 +151,20 @@ export default function Settings({
         const payload = event.payload;
         if (payload.type === "done") {
           setParakeetDownload(null);
+          setParakeetDownloadError(null);
           api.localParakeetStatus().then(setParakeetStatus).catch(() => {});
           return;
         }
         if (payload.type === "error") {
           setParakeetDownload(null);
+          setParakeetDownloadError(
+            payload.message ?? "The Parakeet download failed. Try again.",
+          );
           return;
         }
+        setParakeetDownloadError(null);
         setParakeetDownload(
-          `${payload.downloadedMb}/${payload.totalMb} MB`,
+          `${payload.downloadedMb} MB${payload.totalMb ? `/${payload.totalMb} MB` : ""}`,
         );
       },
     );
@@ -229,15 +251,21 @@ export default function Settings({
         const payload = event.payload;
         if (payload.type === "done") {
           setLlmDownload(null);
+          setLlmDownloadError(null);
           api.localLlmStatus().then(setLocalLlms).catch(() => {});
           return;
         }
         if (payload.type === "error") {
           setLlmDownload(null);
+          setLlmDownloadError({
+            model: payload.model,
+            message: payload.message ?? "The cleanup model download failed. Try again.",
+          });
           return;
         }
+        setLlmDownloadError(null);
         setLlmDownload(
-          `${payload.model}: ${payload.downloadedMb}/${payload.totalMb} MB`,
+          `${payload.model}: ${payload.downloadedMb} MB${payload.totalMb ? `/${payload.totalMb} MB` : ""}`,
         );
       },
     );
@@ -252,12 +280,11 @@ export default function Settings({
       await api.setLocalLlm(id);
       const info = localLlms.find((m) => m.id === id);
       if (info && !info.downloaded) {
-        setLlmDownload(`${id}: starting…`);
-        await api.downloadLocalLlm(id);
+        await downloadLocalLlm(id);
       }
     } catch (e) {
       console.error(e);
-      setLlmDownload(null);
+      setLlmDownloadError({ model: id, message: readableError(e) });
     }
   }
 
@@ -301,18 +328,46 @@ export default function Settings({
       }
     } catch (e) {
       console.error(e);
-      setLocalDownload(null);
+      setLocalDownloadError({ model: id, message: readableError(e) });
     }
   }
 
   async function downloadLocalModel(id: string) {
-    if (localDownload?.startsWith(`${id}:`)) return;
+    if (localDownload !== null) return;
+    setLocalDownloadError(null);
     setLocalDownload(`${id}: starting…`);
     try {
       await api.downloadLocalModel(id);
     } catch (e) {
       console.error(e);
       setLocalDownload(null);
+      setLocalDownloadError({ model: id, message: readableError(e) });
+    }
+  }
+
+  async function downloadLocalLlm(id: string) {
+    if (llmDownload !== null) return;
+    setLlmDownloadError(null);
+    setLlmDownload(`${id}: starting…`);
+    try {
+      await api.downloadLocalLlm(id);
+    } catch (e) {
+      console.error(e);
+      setLlmDownload(null);
+      setLlmDownloadError({ model: id, message: readableError(e) });
+    }
+  }
+
+  async function downloadParakeet() {
+    if (parakeetDownload !== null || !parakeetStatus.available) return;
+    setParakeetDownloadError(null);
+    setParakeetDownload("starting…");
+    try {
+      await api.downloadLocalParakeet();
+    } catch (e) {
+      console.error(e);
+      setParakeetDownload(null);
+      setParakeetDownloadError(readableError(e));
     }
   }
 
@@ -320,15 +375,13 @@ export default function Settings({
     if (engine === "parakeet" && !parakeetStatus.available) return;
     try {
       if (engine === "parakeet" && !parakeetStatus.downloaded) {
-        setParakeetDownload("starting…");
-        await api.downloadLocalParakeet();
-        setParakeetStatus((current) => ({ ...current, downloaded: true }));
+        await downloadParakeet();
       }
       await api.setSetting("sttLocalEngine", engine);
       setLocalEngine(engine);
     } catch (e) {
       console.error(e);
-      setParakeetDownload(null);
+      setParakeetDownloadError(readableError(e));
     }
   }
 
@@ -619,47 +672,61 @@ export default function Settings({
         {localEngine === "whisper" ? (
           <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
             {localModels.map((m) => (
-              <div key={m.id} className="flex items-center justify-between gap-4">
-                <label className="flex flex-1 items-center gap-3 text-sm">
-                  <input
-                    type="radio"
-                    name="localModel"
-                    checked={localModel === m.id}
-                    onChange={() => changeLocalModel(m.id)}
-                    className="accent-indigo-400"
-                  />
-                  <span className="text-neutral-300">{m.label}</span>
-                  {!m.downloaded && (
-                    <span className="text-xs text-neutral-600">
-                      ~{m.approxMb} MB
+              <div key={m.id} className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-4">
+                  <label className="flex flex-1 items-center gap-3 text-sm">
+                    <input
+                      type="radio"
+                      name="localModel"
+                      checked={localModel === m.id}
+                      onChange={() => changeLocalModel(m.id)}
+                      className="accent-indigo-400"
+                    />
+                    <span className="text-neutral-300">{m.label}</span>
+                    {!m.downloaded && (
+                      <span className="text-xs text-neutral-600">
+                        ~{m.approxMb} MB
+                      </span>
+                    )}
+                  </label>
+                  <div className="flex shrink-0 items-center gap-3">
+                    <span
+                      className={`text-xs ${
+                        m.downloaded ? "text-emerald-400" : "text-neutral-500"
+                      }`}
+                    >
+                      {localDownload?.startsWith(`${m.id}:`)
+                        ? localDownload.split(": ", 2)[1] ?? "Downloading…"
+                        : m.downloaded
+                          ? "Ready"
+                          : "Not downloaded"}
                     </span>
-                  )}
-                </label>
-                <div className="flex shrink-0 items-center gap-3">
-                  <span
-                    className={`text-xs ${
-                      m.downloaded ? "text-emerald-400" : "text-neutral-500"
-                    }`}
-                  >
-                    {localDownload?.startsWith(`${m.id}:`)
-                      ? localDownload.split(": ", 2)[1] ?? "Downloading…"
-                      : m.downloaded
-                        ? "Ready"
-                        : "Not downloaded"}
-                  </span>
-                  {!m.downloaded && (
+                    {!m.downloaded && (
+                      <button
+                        type="button"
+                        onClick={() => downloadLocalModel(m.id)}
+                        disabled={localDownload !== null}
+                        className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-50"
+                      >
+                        {localDownload?.startsWith(`${m.id}:`)
+                          ? "Downloading…"
+                          : "Download"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {localDownloadError?.model === m.id && (
+                  <div className="flex items-center justify-between gap-3 rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                    <span>{localDownloadError.message}</span>
                     <button
                       type="button"
                       onClick={() => downloadLocalModel(m.id)}
-                      disabled={localDownload?.startsWith(`${m.id}:`)}
-                      className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-50"
+                      className="shrink-0 text-red-200 underline underline-offset-2 hover:text-white"
                     >
-                      {localDownload?.startsWith(`${m.id}:`)
-                        ? "Downloading…"
-                        : "Download"}
+                      Retry
                     </button>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -667,17 +734,41 @@ export default function Settings({
           <div className="flex flex-col gap-1 rounded-lg border border-white/5 bg-white/[0.03] px-4 py-3">
             <div className="flex items-center justify-between gap-4 text-sm">
               <span className="text-neutral-300">Parakeet TDT 0.6B v3</span>
-              <span
-                className={
-                  parakeetStatus.downloaded
-                    ? "text-xs text-emerald-400"
-                    : "text-xs text-neutral-500"
-                }
-              >
-                {parakeetDownload ??
-                  (parakeetStatus.downloaded ? "Ready" : "Not downloaded")}
-              </span>
+              <div className="flex items-center gap-3">
+                <span
+                  className={
+                    parakeetStatus.downloaded
+                      ? "text-xs text-emerald-400"
+                      : "text-xs text-neutral-500"
+                  }
+                >
+                  {parakeetDownload ??
+                    (parakeetStatus.downloaded ? "Ready" : "Not downloaded")}
+                </span>
+                {!parakeetStatus.downloaded && (
+                  <button
+                    type="button"
+                    onClick={downloadParakeet}
+                    disabled={parakeetDownload !== null}
+                    className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {parakeetDownload ? "Downloading…" : "Download"}
+                  </button>
+                )}
+              </div>
             </div>
+            {parakeetDownloadError && (
+              <div className="flex items-center justify-between gap-3 rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                <span>{parakeetDownloadError}</span>
+                <button
+                  type="button"
+                  onClick={downloadParakeet}
+                  className="shrink-0 text-red-200 underline underline-offset-2 hover:text-white"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             <p className="text-xs text-neutral-600">
               ~300 MB download. Offline batch recognition; Whisper-only prompt
               and language hints are not applied.
@@ -831,33 +922,59 @@ export default function Settings({
             }`}
           >
             {localLlms.map((m) => (
-              <div key={m.id} className="flex items-center justify-between gap-4">
-                <label className="flex flex-1 items-center gap-3 text-sm">
-                  <input
-                    type="radio"
-                    name="localLlm"
-                    checked={localLlm === m.id}
-                    onChange={() => changeLocalLlm(m.id)}
-                    className="accent-indigo-400"
-                  />
-                  <span className="text-neutral-300">{m.label}</span>
+              <div key={m.id} className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-4">
+                  <label className="flex flex-1 items-center gap-3 text-sm">
+                    <input
+                      type="radio"
+                      name="localLlm"
+                      checked={localLlm === m.id}
+                      onChange={() => changeLocalLlm(m.id)}
+                      className="accent-indigo-400"
+                    />
+                    <span className="text-neutral-300">{m.label}</span>
+                    {!m.downloaded && (
+                      <span className="text-xs text-neutral-600">
+                        ~{m.approxMb} MB
+                      </span>
+                    )}
+                  </label>
+                  <span
+                    className={`shrink-0 text-xs ${
+                      m.downloaded ? "text-emerald-400" : "text-neutral-500"
+                    }`}
+                  >
+                    {llmDownload?.startsWith(`${m.id}:`)
+                      ? llmDownload.split(": ", 2)[1] ?? "Downloading…"
+                      : m.downloaded
+                        ? "Ready"
+                        : "Not downloaded"}
+                  </span>
                   {!m.downloaded && (
-                    <span className="text-xs text-neutral-600">
-                      ~{m.approxMb} MB
-                    </span>
+                    <button
+                      type="button"
+                      onClick={() => downloadLocalLlm(m.id)}
+                      disabled={llmDownload !== null}
+                      className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {llmDownload?.startsWith(`${m.id}:`)
+                        ? "Downloading…"
+                        : "Download"}
+                    </button>
                   )}
-                </label>
-                <span
-                  className={`shrink-0 text-xs ${
-                    m.downloaded ? "text-emerald-400" : "text-neutral-500"
-                  }`}
-                >
-                  {llmDownload?.startsWith(`${m.id}:`)
-                    ? llmDownload.split(": ", 2)[1] ?? "Downloading…"
-                    : m.downloaded
-                      ? "Ready"
-                      : "Not downloaded"}
-                </span>
+                </div>
+                {llmDownloadError?.model === m.id && (
+                  <div className="flex items-center justify-between gap-3 rounded-md bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                    <span>{llmDownloadError.message}</span>
+                    <button
+                      type="button"
+                      onClick={() => downloadLocalLlm(m.id)}
+                      className="shrink-0 text-red-200 underline underline-offset-2 hover:text-white"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
             <p className="text-xs text-neutral-600">
@@ -1177,4 +1294,10 @@ interface ModelProgressPayload {
   downloadedMb: number;
   totalMb: number;
   message?: string;
+}
+
+function readableError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "The download failed. Try again.";
 }

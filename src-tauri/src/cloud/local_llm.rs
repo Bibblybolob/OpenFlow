@@ -5,6 +5,7 @@
 //! load (utilityai/llama-cpp-rs#263). The sidecar links llama.cpp alone,
 //! loads the model once, and answers JSON-line requests over stdio.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,8 @@ pub const LOCAL_LLMS: &[LocalLlm] = &[
 ];
 
 const DEFAULT_LOCAL_LLM_ID: &str = "qwen3-4b";
+const MIN_VALID_MODEL_BYTES: u64 = 50 * 1024 * 1024;
+static DOWNLOADS_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub(crate) fn catalog_llm(id: &str) -> Option<&'static LocalLlm> {
     LOCAL_LLMS.iter().find(|m| m.id == id)
@@ -81,7 +84,48 @@ pub fn llm_path(id: &str) -> PathBuf {
 }
 
 pub fn is_downloaded(id: &str) -> bool {
-    llm_path(id).try_exists().unwrap_or(false)
+    model_file_is_usable(&llm_path(id))
+}
+
+fn model_file_is_usable(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.len() >= MIN_VALID_MODEL_BYTES)
+            .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod model_file_tests {
+    use super::{model_file_is_usable, MIN_VALID_MODEL_BYTES};
+    use std::fs::{self, File};
+    use std::path::PathBuf;
+
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("flowclone-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn incomplete_cleanup_model_is_not_downloaded() {
+        let path = temp_path("tiny-llm");
+        let _ = fs::remove_file(&path);
+        let file = File::create(&path).unwrap();
+        file.set_len(MIN_VALID_MODEL_BYTES - 1).unwrap();
+        drop(file);
+        assert!(!model_file_is_usable(&path));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn complete_cleanup_model_is_downloaded() {
+        let path = temp_path("valid-llm");
+        let _ = fs::remove_file(&path);
+        let file = File::create(&path).unwrap();
+        file.set_len(MIN_VALID_MODEL_BYTES).unwrap();
+        drop(file);
+        assert!(model_file_is_usable(&path));
+        let _ = fs::remove_file(path);
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -97,9 +141,34 @@ pub fn download_model(app: &tauri::AppHandle, id: &str) -> Result<PathBuf> {
     let Some(entry) = catalog_llm(id) else {
         return Err(StoreError::Other(format!("unknown local LLM: {id}")));
     };
+    let in_flight = DOWNLOADS_IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = in_flight.lock().unwrap();
+    if !guard.insert(id.to_string()) {
+        return Err(StoreError::Other(
+            "this cleanup model is already downloading".to_string(),
+        ));
+    }
+    drop(guard);
+
     let dest = llm_path(id);
+    let result = download_model_inner(app, id, entry, &dest);
+    in_flight.lock().unwrap().remove(id);
+    result
+}
+
+fn download_model_inner(
+    app: &tauri::AppHandle,
+    id: &str,
+    entry: &LocalLlm,
+    dest: &Path,
+) -> Result<PathBuf> {
     if is_downloaded(id) {
-        return Ok(dest);
+        return Ok(dest.to_path_buf());
+    }
+    if dest.exists() {
+        // Windows cannot rename over an existing destination. Remove an
+        // invalid prior file before replacing it with the fresh download.
+        std::fs::remove_file(dest)?;
     }
 
     let mut resp = super::http_client()?
@@ -149,16 +218,16 @@ pub fn download_model(app: &tauri::AppHandle, id: &str) -> Result<PathBuf> {
     file.flush()?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     drop(file);
-    if size < 50 * 1024 * 1024 {
-        let _ = std::fs::remove_file(&dest);
+    if size < MIN_VALID_MODEL_BYTES {
+        let _ = std::fs::remove_file(&partial);
         return Err(StoreError::Other(
             "downloaded file looks truncated — please retry".to_string(),
         ));
     }
 
-    std::fs::rename(&partial, &dest)?;
+    std::fs::rename(&partial, dest)?;
     let _ = app.emit("local-llm-progress", json!({ "type": "done", "model": id }));
-    Ok(dest)
+    Ok(dest.to_path_buf())
 }
 
 // ---------------------------------------------------------------------------
