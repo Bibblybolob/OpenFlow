@@ -1,12 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { motion } from "framer-motion";
 import { api } from "../../lib/ipc";
 import { usePipelineState } from "../usePipelineState";
 
-type Step = "welcome" | "permissions" | "hotkey" | "done";
+type Step = "welcome" | "permissions" | "model" | "hotkey" | "done";
 
 interface CheckState {
   status: "pending" | "checking" | "ok" | "failed";
+  message?: string;
+}
+
+interface LocalModelInfo {
+  id: string;
+  label: string;
+  approxMb: number;
+  downloaded: boolean;
+}
+
+interface ModelProgressPayload {
+  type?: string;
+  model: string;
+  downloadedMb: number;
+  totalMb: number;
   message?: string;
 }
 
@@ -16,6 +32,10 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [inputMonitoring, setInputMonitoring] = useState<CheckState>({ status: "pending" });
   const [mic, setMic] = useState<CheckState>({ status: "pending" });
   const [hotkey, setHotkey] = useState<string[]>([]);
+  const [localModels, setLocalModels] = useState<LocalModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState("base");
+  const [modelDownload, setModelDownload] = useState<string | null>(null);
+  const [modelError, setModelError] = useState<string | null>(null);
   const { lastTranscriptId } = usePipelineState();
 
   useEffect(() => {
@@ -60,6 +80,47 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
     }
   }, [step, runChecks]);
 
+  const refreshModels = useCallback(async () => {
+    setModelError(null);
+    try {
+      const models = await api.localModelStatus();
+      setLocalModels(models);
+      const configured = models.find((model) => model.id === selectedModel);
+      if (!configured && models.length > 0) setSelectedModel(models[0].id);
+    } catch (error) {
+      setModelError(readableError(error));
+    }
+  }, [selectedModel]);
+
+  useEffect(() => {
+    if (step === "model") refreshModels();
+  }, [refreshModels, step]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<ModelProgressPayload>("local-model-progress", (event) => {
+      const payload = event.payload;
+      if (payload.type === "done") {
+        setModelDownload(null);
+        setModelError(null);
+        api.localModelStatus().then(setLocalModels).catch(() => {});
+        return;
+      }
+      if (payload.type === "error") {
+        setModelDownload(null);
+        setModelError(
+          payload.message ?? "The model download failed. Try again.",
+        );
+        return;
+      }
+      setModelError(null);
+      setModelDownload(
+        `${payload.downloadedMb} MB${payload.totalMb ? `/${payload.totalMb} MB` : ""}`,
+      );
+    }).then((fn) => (unlisten = fn));
+    return () => unlisten?.();
+  }, []);
+
   useEffect(() => {
     if (step === "hotkey" && lastTranscriptId !== null) {
       finish(true);
@@ -73,7 +134,29 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
     onComplete();
   }
 
-  const stepIndex = ["welcome", "permissions", "hotkey", "done"].indexOf(step);
+  async function chooseModel(id: string) {
+    setSelectedModel(id);
+    setModelError(null);
+    try {
+      await api.setLocalModel(id);
+    } catch (error) {
+      setModelError(readableError(error));
+    }
+  }
+
+  async function downloadModel() {
+    if (modelDownload !== null) return;
+    setModelError(null);
+    setModelDownload("starting…");
+    try {
+      await api.downloadLocalModel(selectedModel);
+    } catch (error) {
+      setModelDownload(null);
+      setModelError(readableError(error));
+    }
+  }
+
+  const stepIndex = ["welcome", "permissions", "model", "hotkey", "done"].indexOf(step);
 
   return (
     <div className="flex h-screen items-center justify-center bg-[#0d0d10]">
@@ -85,7 +168,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
         className="w-full max-w-lg rounded-2xl border border-white/10 bg-white/[0.03] p-8"
       >
         <div className="mb-6 flex items-center justify-center gap-1.5">
-          {["welcome", "permissions", "hotkey"].map((s, i) => (
+          {["welcome", "permissions", "model", "hotkey"].map((s, i) => (
             <span
               key={s}
               className={`h-1.5 w-8 rounded-full transition-colors ${
@@ -106,7 +189,7 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
             mic={mic}
             onRecheck={runChecks}
             onOpenSettings={api.openAccessibilitySettings}
-            onNext={() => setStep("hotkey")}
+            onNext={() => setStep("model")}
             ready={
               accessibility.status === "ok" &&
               inputMonitoring.status === "ok" &&
@@ -115,10 +198,142 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
           />
         )}
 
+        {step === "model" && (
+          <ModelSetup
+            models={localModels}
+            selectedModel={selectedModel}
+            downloadStatus={modelDownload}
+            error={modelError}
+            onChoose={chooseModel}
+            onDownload={downloadModel}
+            onRefresh={refreshModels}
+            onNext={() => setStep("hotkey")}
+          />
+        )}
+
         {step === "hotkey" && (
           <HotkeyTest hotkey={hotkey.join(" + ")} onSkip={() => finish(true)} />
         )}
       </motion.div>
+    </div>
+  );
+}
+
+function ModelSetup({
+  models,
+  selectedModel,
+  downloadStatus,
+  error,
+  onChoose,
+  onDownload,
+  onRefresh,
+  onNext,
+}: {
+  models: LocalModelInfo[];
+  selectedModel: string;
+  downloadStatus: string | null;
+  error: string | null;
+  onChoose: (id: string) => void;
+  onDownload: () => void;
+  onRefresh: () => void;
+  onNext: () => void;
+}) {
+  const selected = models.find((model) => model.id === selectedModel);
+  const ready = selected?.downloaded === true;
+
+  return (
+    <div>
+      <h1 className="text-center text-xl font-semibold text-white">
+        Set up transcription
+      </h1>
+      <p className="mx-auto mt-2 max-w-sm text-center text-sm text-neutral-400">
+        Download one on-device model before your first dictation. The model
+        runs locally after setup and does not send your audio to a cloud API.
+      </p>
+
+      <div className="mt-6 flex flex-col gap-2">
+        {models.map((model) => {
+          const downloading = model.id === selectedModel && downloadStatus !== null;
+          return (
+            <div
+              key={model.id}
+              className="flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/[0.03] px-4 py-3"
+            >
+              <label className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                <input
+                  type="radio"
+                  name="onboarding-model"
+                  checked={selectedModel === model.id}
+                  onChange={() => onChoose(model.id)}
+                  className="accent-indigo-400"
+                />
+                <span className="min-w-0">
+                  <span className="block truncate text-sm text-neutral-200">
+                    {model.label}
+                  </span>
+                  {!model.downloaded && (
+                    <span className="block text-[11px] text-neutral-600">
+                      About {model.approxMb} MB
+                    </span>
+                  )}
+                </span>
+              </label>
+              <div className="flex shrink-0 items-center gap-2">
+                <span
+                  className={`text-xs ${
+                    model.downloaded ? "text-emerald-400" : "text-neutral-500"
+                  }`}
+                >
+                  {downloading
+                    ? downloadStatus
+                    : model.downloaded
+                      ? "Ready"
+                      : "Not downloaded"}
+                </span>
+                {!model.downloaded && selectedModel === model.id && (
+                  <button
+                    type="button"
+                    onClick={onDownload}
+                    disabled={downloadStatus !== null}
+                    className="rounded-md border border-white/10 px-2.5 py-1 text-xs text-neutral-300 hover:bg-white/[0.06] disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {downloadStatus ? "Downloading…" : "Download"}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {models.length === 0 && !error && (
+        <p className="mt-4 text-center text-xs text-neutral-500">
+          Loading available models…
+        </p>
+      )}
+      {error && (
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={models.length > 0 ? onDownload : onRefresh}
+            className="shrink-0 text-red-200 underline underline-offset-2 hover:text-white"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      <div className="mt-8 flex justify-center">
+        <button
+          type="button"
+          onClick={onNext}
+          disabled={!ready}
+          className="rounded-lg bg-indigo-500/90 px-6 py-2.5 text-sm font-medium text-white transition enabled:hover:bg-indigo-500 disabled:opacity-40"
+        >
+          Continue
+        </button>
+      </div>
     </div>
   );
 }
@@ -320,6 +535,12 @@ function CheckRow({
       </div>
     </div>
   );
+}
+
+function readableError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "Something went wrong. Try again.";
 }
 
 function StatusDot({ state }: { state: CheckState["status"] }) {
