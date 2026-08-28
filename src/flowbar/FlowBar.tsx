@@ -181,6 +181,9 @@ export default function FlowBar() {
       if (next !== "transcribing" && stateRef.current === "transcribing") {
         setPartial(null);
       }
+      if (next === "idle" && stateRef.current !== "idle") {
+        setPartial(null);
+      }
       stateRef.current = next;
       setState(next);
     };
@@ -571,31 +574,39 @@ export default function FlowBar() {
             <span className="text-xs text-neutral-400">Paused</span>
           </div>
         ) : recording ? (
-          <div className="relative flex h-6 flex-1 items-center justify-center gap-[3px]">
-            {wave.map((v, i) => {
-              const boosted = Math.min(1, v * 1.35);
-              return (
-                <span
-                  key={i}
-                  className="w-[5px] shrink-0 rounded-full"
-                  style={{
-                    height: `${Math.max(14, boosted * 100)}%`,
-                    backgroundColor: accent.soft,
-                    opacity: 0.45 + boosted * 0.55,
-                    transition: "height 70ms linear",
-                  }}
-                />
-              );
-            })}
-            {micSilent && (
-              <span className="ml-1 whitespace-nowrap text-[10px] text-amber-300">
-                mic silent?
-              </span>
+          <div className="relative flex h-6 min-w-0 flex-1 items-center justify-center gap-[3px]">
+            {partial ? (
+              <p className="line-clamp-2 min-w-0 max-w-64 flex-1 self-center overflow-hidden text-left text-[11px] leading-[1.05rem] text-neutral-200">
+                {partial}
+              </p>
+            ) : (
+              <>
+                {wave.map((v, i) => {
+                  const boosted = Math.min(1, v * 1.35);
+                  return (
+                    <span
+                      key={i}
+                      className="w-[5px] shrink-0 rounded-full"
+                      style={{
+                        height: `${Math.max(14, boosted * 100)}%`,
+                        backgroundColor: accent.soft,
+                        opacity: 0.45 + boosted * 0.55,
+                        transition: "height 70ms linear",
+                      }}
+                    />
+                  );
+                })}
+                {micSilent && (
+                  <span className="ml-1 whitespace-nowrap text-[10px] text-amber-300">
+                    mic silent?
+                  </span>
+                )}
+              </>
             )}
           </div>
         ) : busy ? (
           partial ? (
-            <p className="line-clamp-2 max-h-7 flex-1 self-center overflow-hidden text-left text-[11px] leading-[1.05rem] text-neutral-200">
+            <p className="line-clamp-2 max-h-7 min-w-0 max-w-64 flex-1 self-center overflow-hidden text-left text-[11px] leading-[1.05rem] text-neutral-200">
               {partial}
             </p>
           ) : (

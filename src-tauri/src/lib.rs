@@ -38,6 +38,15 @@ fn with_db<T>(state: &AppState, f: impl FnOnce(&Store) -> T) -> T {
     f(&state.db)
 }
 
+/// Preferred input device name from settings; `None` means system default.
+pub(crate) fn configured_mic(db: &Store) -> Option<String> {
+    db.get_setting("micDevice")
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<Option<String>>(&value).ok())
+        .flatten()
+}
+
 pub(crate) const FLOWBAR_SIZE: (f64, f64) = (240.0, 52.0);
 
 /// Location and time of the most recent injection. Scratch is only safe while
@@ -164,6 +173,15 @@ pub(crate) fn update_tray(app: &tauri::AppHandle, next: pipeline::PipelineState)
     let _ = tray_menu.toggle.set_text(label);
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_tooltip(Some(format!("FlowClone — {next}")));
+    }
+}
+
+/// Shows the existing Hub window for tray, reopen, and second-launch actions.
+fn show_hub(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("hub") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
     }
 }
 
@@ -466,6 +484,13 @@ fn list_mics() -> Vec<String> {
 }
 
 #[tauri::command]
+fn mic_device_status(state: tauri::State<AppState>) -> store::Result<audio::MicDeviceStatus> {
+    let configured = with_db(&state, configured_mic);
+    audio::input_device_status(configured)
+        .map_err(|error| store::StoreError::Other(error.to_string()))
+}
+
+#[tauri::command]
 fn set_mic_device(state: tauri::State<AppState>, name: Option<String>) -> store::Result<()> {
     with_db(&state, |db| {
         db.set_setting("micDevice", &serde_json::json!(name))
@@ -536,6 +561,7 @@ fn check_mic_permission(state: tauri::State<AppState>) -> store::Result<bool> {
         return Ok(true);
     }
     let mut probe = audio::AudioEngine::new();
+    probe.set_device(with_db(&state, configured_mic));
     match probe.probe() {
         Ok(()) => Ok(true),
         Err(e) => Err(store::StoreError::Other(format!(
@@ -964,7 +990,13 @@ fn open_input_monitoring_settings(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        show_hub(app);
+    }));
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -1031,12 +1063,7 @@ pub fn run() {
                         "cancel" => {
                             app.state::<AppState>().pipeline.cancel();
                         }
-                        "hub" => {
-                            if let Some(window) = app.get_webview_window("hub") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
+                        "hub" => show_hub(app),
                         "quit" => app.exit(0),
                         _ => {}
                     })
@@ -1078,6 +1105,7 @@ pub fn run() {
             retry_last,
             toggle_pause,
             list_mics,
+            mic_device_status,
             set_mic_device,
             get_hotkey,
             hotkey_options,
@@ -1134,10 +1162,7 @@ pub fn run() {
             // every window is hidden in the menu bar / tray.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = _event {
-                if let Some(window) = _app.get_webview_window("hub") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_hub(_app);
             }
         });
 }

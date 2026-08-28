@@ -33,6 +33,7 @@ FlowClone has these main functions:
 - You can select a style from the Flow Bar.
 - FlowClone supports 18 specified languages and automatic language detection.
 - The Flow Bar shows the microphone level and the pipeline state.
+- The Flow Bar can show a live preview of completed speech phrases while you dictate.
 - The system tray gives controls for the dictation session, the Hub, and the application.
 - The Hub stores searchable transcript history. You can flag, copy, delete, or paste a transcript again.
 - The onboarding procedure checks permissions and helps you download the first transcription model.
@@ -69,12 +70,15 @@ FlowClone uses this sequence for each dictation session:
 1. The hotkey starts a dictation session.
 2. FlowClone saves the target application and starts the selected microphone.
 3. The audio engine converts the input to 16 kHz mono WAV data.
-4. The selected local model converts the audio to text.
-5. FlowClone expands an exact snippet match without the cleanup model.
-6. If you enable cleanup, the local cleanup model corrects the text.
-7. A recognized voice command runs instead of a paste operation.
-8. FlowClone stages the text on the clipboard and sends the paste shortcut.
-9. FlowClone restores the previous clipboard value if the clipboard did not change.
+4. During recording, FlowClone can transcribe completed speech phrases for a live Flow Bar preview.
+5. After recording stops, the selected local model converts the complete audio to the final text.
+6. FlowClone expands an exact snippet match without the cleanup model.
+7. If you enable cleanup, the local cleanup model corrects the text.
+8. A recognized voice command runs instead of a paste operation.
+9. FlowClone stages the text on the clipboard and sends the paste shortcut.
+10. FlowClone restores the previous clipboard value if the clipboard did not change.
+
+The live preview is for feedback only. The final transcription replaces the preview before FlowClone pastes text or stores history.
 
 A worker thread does transcription, cleanup, command, and paste operations. The hotkey thread remains available while the worker thread operates.
 
@@ -252,6 +256,12 @@ The Settings page shows the current state of both permissions.
 The Windows package does not have a commercial code-signing certificate. SmartScreen can show a warning during the first installation.
 
 In SmartScreen, select **More info**, and then select **Run anyway**.
+
+### FlowClone does not detect speech
+
+Open **Settings**, and then go to **Dictation**. Read the active microphone name below the microphone selector.
+
+Select a different microphone if the active microphone is not correct. If FlowClone shows a fallback warning, connect the saved microphone or select an available microphone.
 
 ## Documentation language
 

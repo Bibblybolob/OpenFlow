@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Sample;
+use serde::Serialize;
 use thiserror::Error;
 
 /// Upload sample rate. Speech STT models operate at 16 kHz natively; feeding
@@ -127,12 +128,99 @@ pub struct AudioEngine {
     discard_note: Option<String>,
 }
 
+/// The input device that FlowClone will use for the next recording.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicDeviceStatus {
+    pub configured: Option<String>,
+    pub active: String,
+    pub using_fallback: bool,
+}
+
 /// Names of every input device on the default host, for the Settings picker.
 pub fn list_input_devices() -> Vec<String> {
     let host = cpal::default_host();
     host.input_devices()
         .map(|devices| devices.filter_map(|d| d.name().ok()).collect::<Vec<_>>())
         .unwrap_or_default()
+}
+
+/// Resolves a saved microphone name against the devices that are currently
+/// available. A missing saved device falls back to the system default.
+fn choose_input_status(
+    configured: Option<&str>,
+    available: &[String],
+    default_name: Option<&str>,
+) -> Result<MicDeviceStatus, AudioError> {
+    let configured = configured
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    if let Some(name) = configured.as_deref() {
+        if available.iter().any(|candidate| candidate == name) {
+            let active = name.to_string();
+            return Ok(MicDeviceStatus {
+                configured,
+                active,
+                using_fallback: false,
+            });
+        }
+    }
+
+    let active = default_name.ok_or(AudioError::NoDevice)?.to_string();
+    Ok(MicDeviceStatus {
+        using_fallback: configured.is_some(),
+        configured,
+        active,
+    })
+}
+
+fn resolve_input_device(
+    host: &cpal::Host,
+    configured: Option<&str>,
+) -> Result<(cpal::Device, MicDeviceStatus), AudioError> {
+    let default_device = host.default_input_device();
+    let default_name = default_device
+        .as_ref()
+        .map(DeviceTrait::name)
+        .transpose()
+        .map_err(|error| AudioError::Stream(error.to_string()))?;
+    if configured
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_none()
+    {
+        let status = choose_input_status(None, &[], default_name.as_deref())?;
+        return Ok((default_device.ok_or(AudioError::NoDevice)?, status));
+    }
+
+    let available: Vec<(String, cpal::Device)> = host
+        .input_devices()
+        .map(|devices| {
+            devices
+                .filter_map(|device| device.name().ok().map(|name| (name, device)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let names: Vec<String> = available.iter().map(|(name, _)| name.clone()).collect();
+    let status = choose_input_status(configured, &names, default_name.as_deref())?;
+
+    let device = if !status.using_fallback && status.configured.is_some() {
+        available
+            .into_iter()
+            .find(|(name, _)| name == &status.active)
+            .map(|(_, device)| device)
+            .ok_or(AudioError::NoDevice)?
+    } else {
+        default_device.ok_or(AudioError::NoDevice)?
+    };
+    Ok((device, status))
+}
+
+/// Reports the device that recording and the microphone probe will use.
+pub fn input_device_status(configured: Option<String>) -> Result<MicDeviceStatus, AudioError> {
+    let host = cpal::default_host();
+    resolve_input_device(&host, configured.as_deref()).map(|(_, status)| status)
 }
 
 impl Default for AudioEngine {
@@ -194,20 +282,14 @@ impl AudioEngine {
         }
 
         let host = cpal::default_host();
-        let device = match &self.device_pref {
-            Some(name) => host
-                .input_devices()
-                .ok()
-                .and_then(|mut devices| {
-                    devices.find(|d| d.name().map(|n| &n == name).unwrap_or(false))
-                })
-                .or_else(|| {
-                    eprintln!("mic \"{name}\" not found — using system default");
-                    host.default_input_device()
-                }),
-            None => host.default_input_device(),
+        let (device, status) = resolve_input_device(&host, self.device_pref.as_deref())?;
+        if status.using_fallback {
+            eprintln!(
+                "mic \"{}\" not found — using {}",
+                status.configured.as_deref().unwrap_or(""),
+                status.active
+            );
         }
-        .ok_or(AudioError::NoDevice)?;
         let config = device
             .default_input_config()
             .map_err(|e| AudioError::Stream(e.to_string()))?;
@@ -283,6 +365,51 @@ impl AudioEngine {
         Ok(())
     }
 
+    /// Returns the number of mono samples captured in the current session.
+    /// This is a cheap read used by the phrase-preview scheduler.
+    pub fn sample_count(&self) -> usize {
+        self.shared.lock().unwrap().samples.len()
+    }
+
+    /// Returns the input sample rate for the current capture session.
+    pub fn sample_rate(&self) -> u32 {
+        self.shared.lock().unwrap().sample_rate
+    }
+
+    /// Copies the audio captured since `start_sample` and prepares it for a
+    /// best-effort live transcription. The returned sample count is the exact
+    /// cursor for the copied buffer, so audio arriving while the mutex is
+    /// released cannot be skipped by the caller.
+    pub fn snapshot_since(
+        &self,
+        start_sample: usize,
+    ) -> Result<(Option<Recording>, usize), AudioError> {
+        let (samples, capture_rate, end_sample) = {
+            let shared = self.shared.lock().unwrap();
+            let end_sample = shared.samples.len();
+            let start = start_sample.min(end_sample);
+            (
+                shared.samples[start..].to_vec(),
+                shared.sample_rate,
+                end_sample,
+            )
+        };
+        let duration_ms = if capture_rate == 0 {
+            0
+        } else {
+            (samples.len() as u128 * 1000 / capture_rate as u128) as i64
+        };
+        let recording = prepare_recording(
+            samples,
+            capture_rate,
+            duration_ms,
+            self.noise_suppression,
+            self.vad_mult,
+            false,
+        )?;
+        Ok((recording, end_sample))
+    }
+
     /// Stops capture and encodes the audio in memory as a mono 16 kHz 16-bit
     /// PCM WAV, ready to upload. Returns `None` for taps too short to be a
     /// real dictation.
@@ -308,53 +435,21 @@ impl AudioEngine {
 
         self.discard_note = None;
 
-        // Preserve a true pre-processing peak for the hallucination guard.
-        // The conditioned signal below is intentionally amplified, so using
-        // its peak made near-silent captures look clearly voiced.
-        let raw_max_frame_rms = max_frame_rms(&samples, capture_rate);
-
-        // Stage 0 — loudness normalization: lift quiet captures into the
-        // range every downstream stage was trained on.
-        let samples = normalize_loudness(samples);
-
-        // Stage A — neural noise suppression (RNNoise family): keyboard,
-        // fan and room noise drop before anything downstream sees them.
-        let mut work = samples;
-        let mut work_rate = capture_rate;
-        if self.noise_suppression {
-            work = suppress_noise(&work, capture_rate);
-            work_rate = 48_000;
-        }
-
-        // Stage B — adaptive voice isolation: hysteresis gate around the
-        // tracked noise floor keeps only voiced spans. Recordings where
-        // nothing was actually spoken are dropped here, which is what
-        // stops STT models from hallucinating text out of silence.
-        let regions = voice_regions(&work, work_rate, self.vad_mult);
-        if regions.voiced_ms < MIN_VOICED_MS {
+        let recording = prepare_recording(
+            samples,
+            capture_rate,
+            elapsed_ms,
+            self.noise_suppression,
+            self.vad_mult,
+            true,
+        )?;
+        if recording.is_none() {
             eprintln!(
-                "voice isolation: discarded {}ms session ({}ms voiced below floor)",
-                elapsed_ms, regions.voiced_ms
+                "voice isolation: discarded {elapsed_ms}ms session (not enough voiced audio)"
             );
             self.discard_note = Some("no speech detected".to_string());
-            return Ok(None);
         }
-        eprintln!(
-            "upload: {}ms session, {}ms voiced, peak rms {:.3}",
-            elapsed_ms, regions.voiced_ms, regions.max_rms
-        );
-        let cropped: Vec<f32> = regions
-            .segments
-            .iter()
-            .flat_map(|(a, b)| work[*a..*b].iter().copied())
-            .collect();
-
-        let wav = encode_wav(&resample_to_16k(&cropped, work_rate), TARGET_SAMPLE_RATE)?;
-        Ok(Some(Recording {
-            duration_ms: elapsed_ms,
-            wav,
-            max_frame_rms: raw_max_frame_rms,
-        }))
+        Ok(recording)
     }
 
     /// Stops capture and throws the audio away (Esc-cancel).
@@ -386,7 +481,7 @@ impl AudioEngine {
     /// permission prompt on first use and (b) verify an input device works.
     pub fn probe(&mut self) -> Result<(), AudioError> {
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or(AudioError::NoDevice)?;
+        let (device, _) = resolve_input_device(&host, self.device_pref.as_deref())?;
         let config = device
             .default_input_config()
             .map_err(|e| AudioError::Stream(e.to_string()))?;
@@ -456,6 +551,69 @@ impl AudioEngine {
         }
         Ok(())
     }
+}
+
+/// Applies the same conditioning used for the final recording to a copied
+/// live segment. Live previews are never used as the final audio; keeping
+/// this path identical makes the preview a useful indication of the eventual
+/// result without changing the established final transcription behavior.
+fn prepare_recording(
+    samples: Vec<f32>,
+    capture_rate: u32,
+    duration_ms: i64,
+    noise_suppression: bool,
+    vad_mult: f32,
+    report: bool,
+) -> Result<Option<Recording>, AudioError> {
+    if samples.is_empty() || capture_rate == 0 {
+        return Ok(None);
+    }
+
+    // Preserve a true pre-processing peak for the hallucination guard. The
+    // conditioned signal below is intentionally amplified, so using its peak
+    // would make a near-silent capture look voiced.
+    let raw_max_frame_rms = max_frame_rms(&samples, capture_rate);
+
+    // Stage 0 — loudness normalization: lift quiet captures into the range
+    // every downstream stage was trained on.
+    let samples = normalize_loudness(samples);
+
+    // Stage A — neural noise suppression (RNNoise family): keyboard, fan and
+    // room noise drop before anything downstream sees them.
+    let mut work = samples;
+    let mut work_rate = capture_rate;
+    if noise_suppression {
+        work = suppress_noise(&work, capture_rate);
+        work_rate = 48_000;
+    }
+
+    // Stage B — adaptive voice isolation: keep only voiced spans so silence
+    // does not produce hallucinated preview or final text.
+    let regions = voice_regions(&work, work_rate, vad_mult);
+    if regions.voiced_ms < MIN_VOICED_MS {
+        return Ok(None);
+    }
+    if report {
+        eprintln!(
+            "upload: {duration_ms}ms session, {}ms voiced, peak rms {:.3}",
+            regions.voiced_ms, regions.max_rms
+        );
+    }
+    let cropped: Vec<f32> = regions
+        .segments
+        .iter()
+        .flat_map(|(a, b)| work[*a..*b].iter().copied())
+        .collect();
+    if cropped.is_empty() {
+        return Ok(None);
+    }
+
+    let wav = encode_wav(&resample_to_16k(&cropped, work_rate), TARGET_SAMPLE_RATE)?;
+    Ok(Some(Recording {
+        duration_ms,
+        wav,
+        max_frame_rms: raw_max_frame_rms,
+    }))
 }
 
 fn push_levelled(
@@ -722,6 +880,43 @@ pub(crate) fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, h
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn microphone_selection_uses_saved_device_when_available() {
+        let available = vec!["Built-in Mic".to_string(), "USB Mic".to_string()];
+        let status = choose_input_status(Some("USB Mic"), &available, Some("Built-in Mic"))
+            .expect("device should resolve");
+        assert_eq!(status.configured.as_deref(), Some("USB Mic"));
+        assert_eq!(status.active, "USB Mic");
+        assert!(!status.using_fallback);
+    }
+
+    #[test]
+    fn microphone_selection_reports_default_fallback() {
+        let available = vec!["Built-in Mic".to_string()];
+        let status =
+            choose_input_status(Some("Disconnected Mic"), &available, Some("Built-in Mic"))
+                .expect("default device should resolve");
+        assert_eq!(status.configured.as_deref(), Some("Disconnected Mic"));
+        assert_eq!(status.active, "Built-in Mic");
+        assert!(status.using_fallback);
+    }
+
+    #[test]
+    fn microphone_selection_reports_system_default() {
+        let status = choose_input_status(None, &[], Some("Built-in Mic"))
+            .expect("default device should resolve");
+        assert_eq!(status.configured, None);
+        assert_eq!(status.active, "Built-in Mic");
+        assert!(!status.using_fallback);
+    }
+
+    #[test]
+    fn microphone_selection_needs_an_available_default() {
+        let error = choose_input_status(Some("Disconnected Mic"), &[], None)
+            .expect_err("selection must fail without an input device");
+        assert!(matches!(error, AudioError::NoDevice));
+    }
 
     #[test]
     fn wav_roundtrip_in_memory() {

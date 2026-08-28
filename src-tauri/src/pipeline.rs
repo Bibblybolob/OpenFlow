@@ -31,6 +31,13 @@ const HANDS_FREE_SILENCE_STOP_MS: u64 = 1500;
 /// captured essentially silence/room tone, so whisper-style models tend to
 /// confabulate stock phrases rather than transcribe speech.
 const ARTIFACT_RAW_RMS: f32 = 0.02;
+/// Live previews are phrase-level rather than per-audio-frame. This keeps
+/// local model work bounded while still putting text on screen during a
+/// natural pause in dictation.
+const LIVE_PREVIEW_TICK_MS: u64 = 250;
+const LIVE_PREVIEW_SILENCE_MS: u64 = 550;
+const LIVE_PREVIEW_MIN_SEGMENT_MS: u64 = 400;
+const LIVE_PREVIEW_MAX_SEGMENT_MS: u64 = 2200;
 
 fn noise_suppression_enabled(db: &Store) -> bool {
     db.get_setting("noiseSuppression")
@@ -79,8 +86,75 @@ fn is_whisper_artifact(text: &str) -> bool {
             | "thanks for watching bye"
             | "bye"
             | "bye bye"
+            | "music"
+            | "noise"
+            | "silence"
             | "you"
     )
+}
+
+fn is_non_speech_label(label: &str) -> bool {
+    let normalized = label
+        .trim()
+        .to_lowercase()
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        normalized.as_str(),
+        "music"
+            | "silence"
+            | "noise"
+            | "background noise"
+            | "applause"
+            | "laughter"
+            | "inaudible"
+            | "blank audio"
+            | "no audio"
+            | "no speech"
+    )
+}
+
+/// Whisper and caption-trained models can return a sound label instead of
+/// speech. Drop only results made entirely from those labels or music notes.
+fn is_non_speech_annotation(text: &str) -> bool {
+    let mut rest = text.trim();
+    let mut found = false;
+    while !rest.is_empty() {
+        let Some(first) = rest.chars().next() else {
+            break;
+        };
+        if matches!(first, '♪' | '♫' | '♬' | '♩' | '\u{fe0f}') {
+            rest = rest[first.len_utf8()..].trim_start();
+            found = true;
+            continue;
+        }
+
+        let closing = match first {
+            '[' => ']',
+            '(' => ')',
+            _ => return false,
+        };
+        let Some(end) = rest.find(closing) else {
+            return false;
+        };
+        if !is_non_speech_label(&rest[first.len_utf8()..end]) {
+            return false;
+        }
+        rest = rest[end + closing.len_utf8()..].trim_start();
+        found = true;
+    }
+    found
+}
+
+fn should_drop_transcript(text: &str, max_frame_rms: f32) -> bool {
+    is_non_speech_annotation(text)
+        || (max_frame_rms < ARTIFACT_RAW_RMS && is_whisper_artifact(text))
+}
+
+fn filter_preview_text(text: String, max_frame_rms: f32) -> Option<String> {
+    (!text.trim().is_empty() && !should_drop_transcript(&text, max_frame_rms)).then_some(text)
 }
 
 /// Broadcasts hotkey-watcher lifecycle to the webviews so the Hub can show
@@ -181,6 +255,17 @@ enum Msg {
     /// Generation tagging prevents an old timer from stopping a later session.
     AutoStop {
         generation: u64,
+    },
+    /// Checks whether a completed speech phrase is ready for a best-effort
+    /// live transcription. Generation tagging disarms old timers.
+    PreviewTick {
+        generation: u64,
+    },
+    /// Returns a phrase preview to the handler. The final full-session
+    /// transcription remains authoritative for paste and history.
+    PreviewDone {
+        generation: u64,
+        text: Option<String>,
     },
 }
 
@@ -523,6 +608,12 @@ fn handler_loop(
     // counter that invalidates stale hands-free auto-stop watchdogs.
     let last_voice_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let session_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Cursor and text for best-effort phrase previews. The final worker still
+    // transcribes the complete recording, so a preview can never replace the
+    // authoritative result or make cancellation unsafe.
+    let mut preview_cursor = 0usize;
+    let mut preview_text = String::new();
+    let mut preview_busy = false;
     let Metering {
         mic_level,
         mic_voiced,
@@ -564,10 +655,11 @@ fn handler_loop(
                 {
                     // Pressing the hotkey while paused resumes capture.
                     audio.resume();
+                    last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                     let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
                     spawn_max_session_timer(&timer_tx, generation);
+                    spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                     if mode == Mode::HandsFree {
-                        last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                         spawn_handsfree_watchdog(
                             &timer_tx,
                             Arc::clone(&last_voice_ms),
@@ -611,7 +703,7 @@ fn handler_loop(
                         continue;
                     }
                     current_app = inject::frontmost_app();
-                    audio.set_device(mic_preference(&db));
+                    audio.set_device(crate::configured_mic(&db));
                     audio.set_processing(noise_suppression_enabled(&db), vad_sensitivity_mult(&db));
                     if let Err(e) = audio.start() {
                         // Never swallow this: a dead mic must look different
@@ -620,11 +712,14 @@ fn handler_loop(
                         continue;
                     }
                     crate::begin_context_capture();
+                    reset_live_preview(&mut preview_cursor, &mut preview_text, &mut preview_busy);
+                    last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                     mode = Mode::Ptt;
                     pending_tap = false;
                     second_tap_down = false;
                     let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
                     spawn_max_session_timer(&timer_tx, generation);
+                    spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                 }
                 // Down while Ptt (second press of entering double-tap) or
@@ -698,7 +793,7 @@ fn handler_loop(
                             // go hands-free.
                             audio.discard();
                             current_app = inject::frontmost_app();
-                            audio.set_device(mic_preference(&db));
+                            audio.set_device(crate::configured_mic(&db));
                             audio.set_processing(
                                 noise_suppression_enabled(&db),
                                 vad_sensitivity_mult(&db),
@@ -711,6 +806,11 @@ fn handler_loop(
                                 first_tap_at = None;
                                 second_tap_down = false;
                             } else {
+                                reset_live_preview(
+                                    &mut preview_cursor,
+                                    &mut preview_text,
+                                    &mut preview_busy,
+                                );
                                 mode = Mode::HandsFree;
                                 pending_tap = false;
                                 first_tap_at = None;
@@ -731,6 +831,7 @@ fn handler_loop(
                                     gen,
                                 );
                                 spawn_max_session_timer(&timer_tx, gen);
+                                spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), gen);
                             }
                         }
                         TapAction::Finish => {
@@ -837,10 +938,11 @@ fn handler_loop(
                     let was_paused = state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8();
                     if was_paused {
                         audio.resume();
+                        last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                         let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
                         spawn_max_session_timer(&timer_tx, generation);
+                        spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                         if mode == Mode::HandsFree {
-                            last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                             spawn_handsfree_watchdog(
                                 &timer_tx,
                                 Arc::clone(&last_voice_ms),
@@ -932,6 +1034,74 @@ fn handler_loop(
                     pending_start = false;
                 }
             }
+            Msg::PreviewTick { generation } => {
+                if generation != session_gen.load(Ordering::Relaxed)
+                    || mode == Mode::Idle
+                    || state.load(Ordering::Relaxed) != PipelineState::Recording.as_u8()
+                {
+                    continue;
+                }
+                if preview_busy {
+                    continue;
+                }
+                let end_sample = audio.sample_count();
+                let sample_rate = audio.sample_rate();
+                let new_samples = end_sample.saturating_sub(preview_cursor);
+                let segment_ms = if sample_rate == 0 {
+                    0
+                } else {
+                    (new_samples as u128 * 1000 / sample_rate as u128) as u64
+                };
+                let silent_for = unix_ms().saturating_sub(last_voice_ms.load(Ordering::Relaxed));
+                let ready = segment_ms >= LIVE_PREVIEW_MIN_SEGMENT_MS
+                    && (silent_for >= LIVE_PREVIEW_SILENCE_MS
+                        || segment_ms >= LIVE_PREVIEW_MAX_SEGMENT_MS);
+                if !ready {
+                    continue;
+                }
+
+                let start_sample = preview_cursor;
+                match audio.snapshot_since(start_sample) {
+                    Ok((Some(recording), copied_end)) => {
+                        preview_cursor = copied_end;
+                        preview_busy = true;
+                        spawn_live_preview_worker(
+                            &db,
+                            &timer_tx,
+                            generation,
+                            recording,
+                            current_app.clone(),
+                        );
+                    }
+                    Ok((None, copied_end)) => {
+                        // Advance over silence or a too-short phrase. The
+                        // final full-session path still owns the complete
+                        // recording, so this only affects the preview.
+                        preview_cursor = copied_end;
+                    }
+                    Err(_) => {
+                        // Preview is deliberately best effort. Do not let a
+                        // transient local-model or audio-preparation error
+                        // affect the final recording.
+                        preview_cursor = audio.sample_count();
+                    }
+                }
+            }
+            Msg::PreviewDone { generation, text } => {
+                if generation != session_gen.load(Ordering::Relaxed) {
+                    continue;
+                }
+                preview_busy = false;
+                let Some(text) = text.filter(|value| !value.trim().is_empty()) else {
+                    continue;
+                };
+                let merged = merge_preview_text(&preview_text, &text);
+                if merged == preview_text {
+                    continue;
+                }
+                preview_text = merged.clone();
+                let _ = app.emit("stt-partial", serde_json::json!({ "text": merged }));
+            }
             Msg::SessionDone => {
                 worker_flags.busy.store(false, Ordering::Relaxed);
                 if pending_start && mode == Mode::Idle && crate::hotkey::hotkey_held() {
@@ -939,7 +1109,7 @@ fn handler_loop(
                     // begin that queued dictation now.
                     pending_start = false;
                     current_app = inject::frontmost_app();
-                    audio.set_device(mic_preference(&db));
+                    audio.set_device(crate::configured_mic(&db));
                     audio.set_processing(noise_suppression_enabled(&db), vad_sensitivity_mult(&db));
                     crate::begin_context_capture();
                     if let Err(e) = audio.start() {
@@ -949,14 +1119,115 @@ fn handler_loop(
                         pending_tap = false;
                         first_tap_at = None;
                         second_tap_down = false;
+                        reset_live_preview(
+                            &mut preview_cursor,
+                            &mut preview_text,
+                            &mut preview_busy,
+                        );
+                        last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                         let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
                         spawn_max_session_timer(&timer_tx, generation);
+                        spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     }
                 }
             }
         }
     }
+}
+
+fn reset_live_preview(cursor: &mut usize, text: &mut String, busy: &mut bool) {
+    *cursor = 0;
+    text.clear();
+    *busy = false;
+}
+
+/// Runs one low-cost scheduler for a recording generation. Changing the
+/// generation disarms the old scheduler without leaving a thread behind.
+fn spawn_preview_scheduler(
+    tx: &mpsc::Sender<Msg>,
+    session_gen: Arc<std::sync::atomic::AtomicU64>,
+    generation: u64,
+) {
+    let tx = tx.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(LIVE_PREVIEW_TICK_MS));
+        if session_gen.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        if tx.send(Msg::PreviewTick { generation }).is_err() {
+            return;
+        }
+    });
+}
+
+/// Transcribes one captured phrase in the background. Preview failures are
+/// intentionally silent: missing models, a changing device, or an optional
+/// engine error must never turn a successful final dictation into an error.
+fn spawn_live_preview_worker(
+    db: &Arc<Store>,
+    tx: &mpsc::Sender<Msg>,
+    generation: u64,
+    recording: crate::audio::Recording,
+    target_app: String,
+) {
+    let db = Arc::clone(db);
+    let tx = tx.clone();
+    let max_frame_rms = recording.max_frame_rms;
+    std::thread::spawn(move || {
+        let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let language = session_language(&db, &target_app);
+            let prompt = db_prompt(&db);
+            let mut ignore_delta = |_text: &str| {};
+            stt::stream_transcribe(
+                &db,
+                &recording.wav,
+                &language,
+                Some(&prompt),
+                &mut ignore_delta,
+            )
+            .map(|result| result.text)
+        }))
+        .ok()
+        .and_then(|result| result.ok())
+        .and_then(|value| filter_preview_text(value, max_frame_rms));
+
+        let _ = tx.send(Msg::PreviewDone { generation, text });
+    });
+}
+
+/// Joins phrase previews while removing a small repeated boundary. The final
+/// full-session transcription replaces this display text after the user
+/// stops, so this helper favors a stable readable preview over punctuation
+/// preservation at an unfinished phrase boundary.
+fn merge_preview_text(existing: &str, next: &str) -> String {
+    let existing_words: Vec<&str> = existing.split_whitespace().collect();
+    let next_words: Vec<&str> = next.split_whitespace().collect();
+    if existing_words.is_empty() {
+        return next_words.join(" ");
+    }
+    if next_words.is_empty() {
+        return existing_words.join(" ");
+    }
+
+    let max_overlap = existing_words.len().min(next_words.len()).min(12);
+    let overlap = (1..=max_overlap)
+        .rev()
+        .find(|&count| {
+            existing_words[existing_words.len() - count..]
+                .iter()
+                .zip(&next_words[..count])
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+        .unwrap_or(0);
+    let mut merged = existing_words.join(" ");
+    if overlap < next_words.len() {
+        if !merged.is_empty() {
+            merged.push(' ');
+        }
+        merged.push_str(&next_words[overlap..].join(" "));
+    }
+    merged
 }
 
 fn spawn_handsfree_watchdog(
@@ -1151,18 +1422,7 @@ pub(crate) fn run_session(
 
     // Language precedence: a matching per-app style's pinned language wins;
     // otherwise the global setting ("auto" by default).
-    let style_info = llm::resolve_style(db, &target_app).ok().flatten();
-    let language = style_info
-        .as_ref()
-        .and_then(|(_, lang)| lang.clone())
-        .or_else(|| {
-            db.get_setting("language")
-                .ok()
-                .flatten()
-                .and_then(|v| serde_json::from_str::<String>(&v).ok())
-                .filter(|l| !l.is_empty() && l != "auto")
-        })
-        .unwrap_or_else(|| "auto".to_string());
+    let language = session_language(db, &target_app);
 
     // A failure at this stage keeps the audio around so it can be retried
     // without re-recording; success clears any stale job. Streaming deltas
@@ -1201,11 +1461,11 @@ pub(crate) fn run_session(
     // Any non-empty STT result supersedes an older retry, even when the
     // artifact guard below decides not to paste this particular capture.
     crate::clear_retry_job();
-    // Hallucination guard: a near-silent capture that still produced text is
-    // model confabulation — drop it instead of pasting phantom words.
-    if recording.max_frame_rms < ARTIFACT_RAW_RMS && is_whisper_artifact(&raw_text) {
+    // Hallucination guard: sound labels and quiet stock phrases are not user
+    // speech. Drop them instead of pasting or saving phantom text.
+    if should_drop_transcript(&raw_text, recording.max_frame_rms) {
         eprintln!(
-            "artifact guard: dropped quiet-session text {:?} (rms {:.4})",
+            "artifact guard: dropped non-speech text {:?} (rms {:.4})",
             raw_text, recording.max_frame_rms
         );
         timings.report(app);
@@ -1317,15 +1577,6 @@ fn cleanup_enabled(db: &Store) -> bool {
         .flatten()
         .and_then(|v| serde_json::from_str::<bool>(&v).ok())
         .unwrap_or(true)
-}
-
-/// Preferred input device name from settings; None = system default.
-fn mic_preference(db: &Store) -> Option<String> {
-    db.get_setting("micDevice")
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str::<Option<String>>(&v).ok())
-        .flatten()
 }
 
 /// Activation style: "toggle" (press to start, press again to stop — the
@@ -1486,6 +1737,21 @@ fn db_prompt(db: &Store) -> String {
     stt::build_prompt(db).unwrap_or_default()
 }
 
+fn session_language(db: &Store, target_app: &str) -> String {
+    let style_info = llm::resolve_style(db, target_app).ok().flatten();
+    style_info
+        .as_ref()
+        .and_then(|(_, lang)| lang.clone())
+        .or_else(|| {
+            db.get_setting("language")
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str::<String>(&v).ok())
+                .filter(|language| !language.is_empty() && language != "auto")
+        })
+        .unwrap_or_else(|| "auto".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,11 +1762,53 @@ mod tests {
         assert!(is_whisper_artifact("Thanks for watching!"));
         assert!(is_whisper_artifact("Bye"));
         assert!(is_whisper_artifact("  you "));
+        assert!(is_whisper_artifact("music"));
         assert!(is_whisper_artifact(""));
         // Real dictation of the same words must NOT be flagged when the
         // energy gate passes it through with more content.
         assert!(!is_whisper_artifact("thank you for the quick review"));
         assert!(!is_whisper_artifact("bye everyone, see you tomorrow"));
+        assert!(!is_whisper_artifact("play music"));
+        assert!(!is_whisper_artifact("music is playing"));
+    }
+
+    #[test]
+    fn non_speech_annotations_are_dropped_at_any_volume() {
+        for text in [
+            "[Music]",
+            "(MUSIC)",
+            "[Silence]",
+            "[Noise]",
+            "[Applause]",
+            "[Laughter]",
+            "[BLANK_AUDIO]",
+            "♪♫",
+            "♪ [Music] ♫",
+        ] {
+            assert!(should_drop_transcript(text, 1.0), "did not drop {text:?}");
+        }
+    }
+
+    #[test]
+    fn artifact_guard_keeps_real_music_dictation() {
+        assert!(!should_drop_transcript("play music", 0.0));
+        assert!(!should_drop_transcript("music is playing", 0.0));
+        assert!(!should_drop_transcript(
+            "[Music] starts after the title",
+            1.0
+        ));
+        assert!(should_drop_transcript("music", ARTIFACT_RAW_RMS / 2.0));
+        assert!(!should_drop_transcript("music", ARTIFACT_RAW_RMS * 2.0));
+    }
+
+    #[test]
+    fn preview_filter_hides_non_speech_text() {
+        assert_eq!(filter_preview_text("[Music]".to_string(), 1.0), None);
+        assert_eq!(filter_preview_text("  ".to_string(), 1.0), None);
+        assert_eq!(
+            filter_preview_text("play music".to_string(), 0.0).as_deref(),
+            Some("play music")
+        );
     }
 
     #[test]
@@ -1514,6 +1822,23 @@ mod tests {
             TapAction::Finish
         );
         assert_eq!(classify_tap_up(false, false, None), TapAction::Wait);
+    }
+
+    #[test]
+    fn preview_text_appends_new_phrases() {
+        assert_eq!(
+            merge_preview_text("Please open", "the settings page"),
+            "Please open the settings page"
+        );
+    }
+
+    #[test]
+    fn preview_text_removes_repeated_phrase_boundaries() {
+        assert_eq!(
+            merge_preview_text("Please open the", "open the settings page"),
+            "Please open the settings page"
+        );
+        assert_eq!(merge_preview_text("Hello", "hello"), "Hello");
     }
 
     #[test]

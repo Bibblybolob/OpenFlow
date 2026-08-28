@@ -1,3 +1,5 @@
+use std::sync::{Mutex, OnceLock};
+
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Result, Store};
@@ -9,8 +11,15 @@ pub struct TranscriptionResult {
     pub raw_text: String,
 }
 
+// whisper.cpp keeps the model context shared across states. Serializing
+// inference avoids competing local decodes when a live preview finishes near
+// the end of a session, which is both safer for native backends and kinder to
+// CPU-bound machines.
+static TRANSCRIPTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 /// On-device transcription via the configured local engine. `on_delta` fires
-/// once with the complete text (local inference has no partial stream).
+/// once with the complete text for this audio segment. The pipeline uses this
+/// function for both the final recording and best-effort live phrase previews.
 pub fn stream_transcribe(
     db: &Store,
     wav_bytes: &[u8],
@@ -18,6 +27,10 @@ pub fn stream_transcribe(
     prompt: Option<&str>,
     on_delta: &mut dyn FnMut(&str),
 ) -> Result<TranscriptionResult> {
+    let _guard = TRANSCRIPTION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let result = super::local_stt::transcribe_local(db, wav_bytes, language, prompt)?;
     on_delta(&result.text);
     Ok(result)

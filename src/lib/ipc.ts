@@ -8,6 +8,12 @@ import type {
   VocabSuggestion,
 } from "./types";
 
+export interface MicDeviceStatus {
+  configured: string | null;
+  active: string;
+  usingFallback: boolean;
+}
+
 export const api = {
   insertTranscript: (t: {
     text: string;
@@ -121,6 +127,9 @@ export const api = {
   togglePause: () => invoke<string>("toggle_pause"),
 
   listMics: () => invoke<string[]>("list_mics"),
+
+  micDeviceStatus: () =>
+    invoke<MicDeviceStatus>("mic_device_status"),
 
   setMicDevice: (name: string | null) =>
     invoke<void>("set_mic_device", { name }),

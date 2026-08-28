@@ -54,6 +54,8 @@ bzip2 = { version = "0.4", optional = true }
 tar = { version = "0.4", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 embed_plist = "1"
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",

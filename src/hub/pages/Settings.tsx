@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
-import { api } from "../../lib/ipc";
+import { api, type MicDeviceStatus } from "../../lib/ipc";
 import {
   ACCENTS,
   DEFAULT_PILL_STYLE,
@@ -78,6 +78,7 @@ export default function Settings({
   const [watcherStatus, setWatcherStatus] = useState("waiting-permissions");
   const [mics, setMics] = useState<string[]>([]);
   const [mic, setMic] = useState<string>("");
+  const [micStatus, setMicStatus] = useState<MicDeviceStatus | null>(null);
   const [soundEffects, setSoundEffects] = useState(true);
   const [noiseSuppression, setNoiseSuppression] = useState(true);
   const [voiceSensitivity, setVoiceSensitivity] = useState("medium");
@@ -200,6 +201,7 @@ export default function Settings({
     const ws = await api.hotkeyWatcherStatus().catch(() => "waiting-permissions");
     const micList = await api.listMics().catch(() => [] as string[]);
     const micPref = await api.getSetting<string>("micDevice");
+    const resolvedMic = await api.micDeviceStatus().catch(() => null);
     const se = await api.getSetting<boolean>("soundEffects");
     const ns = await api.getSetting<boolean>("noiseSuppression");
     const vs = await api.getSetting<string>("voiceSensitivity");
@@ -232,6 +234,7 @@ export default function Settings({
     setWatcherStatus(ws);
     setMics(micList);
     setMic(micPref ?? "");
+    setMicStatus(resolvedMic);
     setSoundEffects(se ?? true);
     setNoiseSuppression(ns ?? true);
     setVoiceSensitivity(vs ?? "medium");
@@ -437,6 +440,8 @@ export default function Settings({
     setMic(name);
     try {
       await api.setMicDevice(name || null);
+      setMicStatus(await api.micDeviceStatus().catch(() => null));
+      setMicrophone(await api.checkMicPermission().catch(() => false));
     } catch (e) {
       console.error(e);
     }
@@ -610,6 +615,21 @@ export default function Settings({
           ]}
           onChange={changeMic}
         />
+        {micStatus ? (
+          <p
+            className={`text-xs ${
+              micStatus.usingFallback ? "text-amber-400" : "text-neutral-600"
+            }`}
+          >
+            {micStatus.usingFallback
+              ? `${micStatus.configured ?? "The saved microphone"} is not available. FlowClone uses ${micStatus.active}.`
+              : `Active microphone: ${micStatus.active}.`}
+          </p>
+        ) : (
+          <p className="text-xs text-red-400">
+            FlowClone cannot find an input device.
+          </p>
+        )}
         <ToggleRow
           label="Noise suppression"
           hint="RNNoise-style model removes keyboard, fan and room noise before transcription"

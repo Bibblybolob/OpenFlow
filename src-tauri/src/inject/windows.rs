@@ -179,7 +179,7 @@ pub fn focus_app(identifier: &str) -> Result<(), String> {
         return Err("the original target app is no longer running".to_string());
     }
     if unsafe { IsIconic(search.found) }.as_bool() {
-        unsafe { ShowWindow(search.found, SW_RESTORE) };
+        let _ = unsafe { ShowWindow(search.found, SW_RESTORE) };
     }
     if !unsafe { SetForegroundWindow(search.found) }.as_bool() {
         return Err("the original target app did not accept focus".to_string());
