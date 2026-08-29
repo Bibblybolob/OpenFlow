@@ -7,11 +7,11 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::Emitter;
@@ -44,6 +44,7 @@ pub const LOCAL_LLMS: &[LocalLlm] = &[
 const DEFAULT_LOCAL_LLM_ID: &str = "qwen3-4b";
 const MIN_VALID_MODEL_BYTES: u64 = 50 * 1024 * 1024;
 const MIN_EXPECTED_MODEL_PERCENT: u64 = 80;
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 static DOWNLOADS_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub(crate) fn catalog_llm(id: &str) -> Option<&'static LocalLlm> {
@@ -179,37 +180,16 @@ fn download_model_inner(
         std::fs::remove_file(dest)?;
     }
 
-    let mut resp = super::http_client()?
-        .get(hf_url(id))
-        .send()
-        .map_err(|e| StoreError::Other(format!("model download failed: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(StoreError::Other(format!(
-            "model download failed ({})",
-            resp.status()
-        )));
-    }
-
     std::fs::create_dir_all(super::local_stt::models_dir())?;
     let partial = dest.with_extension("part");
     let mut file = File::create(&partial)?;
 
-    let expected_size = resp.content_length();
-    let total = expected_size.unwrap_or(entry.approx_mb * 1024 * 1024);
-    let mut downloaded: usize = 0;
+    let mut downloaded = 0u64;
     let mut last_emit_mb: u64 = 0;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = resp
-            .read(&mut buf)
-            .map_err(|e| StoreError::Other(format!("model download failed: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        downloaded += n;
-
-        let mb = (downloaded / (1024 * 1024)) as u64;
+    let (expected_size, _downloaded) = super::stream_download(hf_url(id), |chunk| {
+        file.write_all(chunk)?;
+        downloaded += chunk.len() as u64;
+        let mb = downloaded / (1024 * 1024);
         if mb > last_emit_mb {
             last_emit_mb = mb;
             let _ = app.emit(
@@ -217,11 +197,12 @@ fn download_model_inner(
                 DownloadProgress {
                     model: id.to_string(),
                     downloaded_mb: mb,
-                    total_mb: total / (1024 * 1024),
+                    total_mb: entry.approx_mb,
                 },
             );
         }
-    }
+        Ok(())
+    })?;
     file.flush()?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     drop(file);
@@ -247,9 +228,27 @@ const GPU_LAYERS: u32 = 99;
 struct EngineProcess {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    replies: mpsc::Receiver<std::io::Result<String>>,
     next_id: u64,
     loaded_path: Option<String>,
+}
+
+#[derive(Debug)]
+enum EngineError {
+    Timeout,
+    Message(String),
+}
+
+impl EngineError {
+    fn message(self) -> String {
+        match self {
+            Self::Timeout => format!(
+                "cleanup timed out after {} seconds",
+                CLEANUP_TIMEOUT.as_secs()
+            ),
+            Self::Message(message) => message,
+        }
+    }
 }
 
 static ENGINE: OnceLock<Mutex<Option<EngineProcess>>> = OnceLock::new();
@@ -304,10 +303,19 @@ fn spawn_engine() -> Result<EngineProcess> {
         .stdout
         .take()
         .ok_or_else(|| StoreError::Other("engine stdout unavailable".to_string()))?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            if reply_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     Ok(EngineProcess {
         child,
         stdin,
-        stdout: BufReader::new(stdout),
+        replies: reply_rx,
         next_id: 1,
         loaded_path: None,
     })
@@ -319,7 +327,8 @@ impl EngineProcess {
     fn request(
         &mut self,
         payload: serde_json::Value,
-    ) -> std::result::Result<serde_json::Value, String> {
+        timeout: Duration,
+    ) -> std::result::Result<serde_json::Value, EngineError> {
         self.next_id += 1;
         let mut req = payload;
         req["id"] = json!(self.next_id);
@@ -328,46 +337,69 @@ impl EngineProcess {
             .write_all(line.as_bytes())
             .and_then(|_| self.stdin.write_all(b"\n"))
             .and_then(|_| self.stdin.flush())
-            .map_err(|e| format!("engine pipe broken: {e}"))?;
+            .map_err(|e| EngineError::Message(format!("engine pipe broken: {e}")))?;
 
-        let mut reply = String::new();
-        let n = self
-            .stdout
-            .read_line(&mut reply)
-            .map_err(|e| format!("engine pipe broken: {e}"))?;
-        if n == 0 {
-            return Err("cleanup engine exited unexpectedly".to_string());
-        }
-        if !reply.starts_with('{') {
+        let reply = match self.replies.recv_timeout(timeout) {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(error)) => {
+                return Err(EngineError::Message(format!("engine pipe broken: {error}")))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => return Err(EngineError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(EngineError::Message(
+                    "cleanup engine exited unexpectedly".to_string(),
+                ))
+            }
+        };
+        if !reply.trim_start().starts_with('{') {
             // The engine's stderr (tracing) must never reach stdout; if it
             // does, surface the stray line instead of a cryptic parse error.
-            return Err(format!(
+            return Err(EngineError::Message(format!(
                 "unexpected engine output: {}",
                 reply.chars().take(200).collect::<String>()
-            ));
+            )));
         }
-        serde_json::from_str(&reply).map_err(|e| format!("bad engine reply: {e}"))
+        serde_json::from_str(&reply)
+            .map_err(|e| EngineError::Message(format!("bad engine reply: {e}")))
     }
 
-    fn ensure_loaded(&mut self, path: &Path) -> std::result::Result<(), String> {
+    fn ensure_loaded(
+        &mut self,
+        path: &Path,
+        deadline: Instant,
+    ) -> std::result::Result<(), EngineError> {
         let path_str = path.to_string_lossy().into_owned();
         if self.loaded_path.as_deref() == Some(path_str.as_str()) {
             return Ok(());
         }
-        let reply = self.request(json!({
-            "op": "load",
-            "path": path_str,
-            "gpuLayers": GPU_LAYERS,
-        }))?;
+        let reply = self.request(
+            json!({
+                "op": "load",
+                "path": path_str,
+                "gpuLayers": GPU_LAYERS,
+            }),
+            remaining(deadline)?,
+        )?;
         if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            return Err(reply
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("load failed")
-                .to_string());
+            return Err(EngineError::Message(
+                reply
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("load failed")
+                    .to_string(),
+            ));
         }
         self.loaded_path = Some(path_str);
         Ok(())
+    }
+}
+
+fn remaining(deadline: Instant) -> std::result::Result<Duration, EngineError> {
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    if timeout.is_zero() {
+        Err(EngineError::Timeout)
+    } else {
+        Ok(timeout)
     }
 }
 
@@ -375,25 +407,41 @@ impl EngineProcess {
 /// Respawns once if the previous process died mid-flight.
 fn with_engine<T>(
     path: &Path,
-    f: impl Fn(&mut EngineProcess) -> std::result::Result<T, String>,
+    f: impl Fn(&mut EngineProcess, Instant) -> std::result::Result<T, EngineError>,
 ) -> Result<T> {
+    let deadline = Instant::now() + CLEANUP_TIMEOUT;
     let slot = engine_slot();
     let mut guard = slot.lock().unwrap();
     if guard.is_none() {
         *guard = Some(spawn_engine()?);
     }
     let engine = guard.as_mut().expect("just ensured");
-    match engine.ensure_loaded(path).and_then(|_| f(engine)) {
+    let run = |engine: &mut EngineProcess| {
+        engine
+            .ensure_loaded(path, deadline)
+            .and_then(|_| f(engine, deadline))
+    };
+    match run(engine) {
         Ok(v) => Ok(v),
-        Err(_first_err) => {
+        Err(EngineError::Timeout) => {
+            let _ = guard.take();
+            Err(StoreError::Other(EngineError::Timeout.message()))
+        }
+        Err(EngineError::Message(_first_err)) => {
             // One retry on a fresh process covers engine crashes.
             let _ = guard.take();
+            if remaining(deadline).is_err() {
+                return Err(StoreError::Other(EngineError::Timeout.message()));
+            }
             *guard = Some(spawn_engine()?);
             let engine = guard.as_mut().expect("just respawned");
-            engine
-                .ensure_loaded(path)
-                .and_then(|_| f(engine))
-                .map_err(StoreError::Other)
+            match run(engine) {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    let _ = guard.take();
+                    Err(StoreError::Other(error.message()))
+                }
+            }
         }
     }
 }
@@ -432,8 +480,11 @@ pub fn polish_local(
     }
 
     let started = std::time::Instant::now();
-    let text = with_engine(&path, |engine| {
-        let reply = engine.request(json!({ "op": "cleanup", "prompt": prompt }))?;
+    let text = with_engine(&path, |engine, deadline| {
+        let reply = engine.request(
+            json!({ "op": "cleanup", "prompt": prompt }),
+            remaining(deadline)?,
+        )?;
         if reply.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             Ok(reply
                 .get("text")
@@ -441,11 +492,13 @@ pub fn polish_local(
                 .unwrap_or("")
                 .to_string())
         } else {
-            Err(reply
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("cleanup failed")
-                .to_string())
+            Err(EngineError::Message(
+                reply
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("cleanup failed")
+                    .to_string(),
+            ))
         }
     })?;
 

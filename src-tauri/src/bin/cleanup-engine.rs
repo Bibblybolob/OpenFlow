@@ -27,6 +27,7 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 struct Engine {
     backend: LlamaBackend,
     model: Option<LlamaModel>,
+    model_path: Option<std::path::PathBuf>,
 }
 
 static ENGINE: OnceLock<std::sync::Mutex<Engine>> = OnceLock::new();
@@ -41,6 +42,7 @@ fn engine() -> &'static std::sync::Mutex<Engine> {
         std::sync::Mutex::new(Engine {
             backend,
             model: None,
+            model_path: None,
         })
     })
 }
@@ -112,14 +114,19 @@ fn handle_load(req: &serde_json::Value) -> Result<serde_json::Value, String> {
     let gpu_layers = req.get("gpuLayers").and_then(|v| v.as_u64()).unwrap_or(99) as u32;
 
     let mut guard = engine().lock().map_err(|e| e.to_string())?;
-    // Reload only when the path actually changed.
-    if guard.model.is_none() {
+    let requested_path = Path::new(path).to_path_buf();
+    // Reload when the user changes the selected cleanup model. The parent
+    // process keeps its engine handle, but the sidecar must not continue to
+    // answer with the previous model after a settings change.
+    if guard.model_path.as_ref() != Some(&requested_path) {
+        guard.model = None;
         let params = LlamaModelParams::default()
             .with_n_gpu_layers(gpu_layers)
             .with_use_mmap(false);
-        let model = LlamaModel::load_from_file(&guard.backend, Path::new(path), &params)
+        let model = LlamaModel::load_from_file(&guard.backend, &requested_path, &params)
             .map_err(|e| format!("failed to load model: {e}"))?;
         guard.model = Some(model);
+        guard.model_path = Some(requested_path);
     }
     Ok(serde_json::json!({"ok": true}))
 }

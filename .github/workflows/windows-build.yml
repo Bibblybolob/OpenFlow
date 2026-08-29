@@ -1,9 +1,9 @@
 name: windows-build
 
-# Builds the fully-offline Windows installer (NSIS + MSI) with the
+# Builds the fully-offline Windows installer (NSIS) with the
 # cleanup-engine sidecar (local Qwen3-4B / whisper cleanup stack) bundled.
-# Runs on every push to main so a fresh download is always available;
-# final on-device smoke test is manual (see plan checklist).
+# Manual installer workflow. The main CI already builds Windows for the
+# rolling update, so this workflow is reserved for an explicit installer run.
 #
 # Notes:
 # - windows-latest ships VS Build Tools (MSVC link), CMake, Ninja and LLVM
@@ -13,8 +13,6 @@ name: windows-build
 #   work + the Vulkan SDK here; kept simple/CPU-first for now.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -25,7 +23,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -36,7 +34,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

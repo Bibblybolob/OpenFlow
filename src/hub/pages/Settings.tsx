@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { api, type MicDeviceStatus } from "../../lib/ipc";
 import {
@@ -16,6 +16,8 @@ import {
   type PillStyle,
 } from "../../lib/pillStyle";
 import { LANGUAGES } from "../../lib/languages";
+import { saveWithRollback } from "../../lib/settingsPersistence";
+import { updateInstallStatus } from "../../lib/updateStatus";
 
 
 interface LocalModelInfo {
@@ -93,6 +95,30 @@ export default function Settings({
   const [availableVersion, setAvailableVersion] = useState<string | null>(
     null,
   );
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const refreshEpoch = useRef(0);
+  const savedPillStyle = useRef<PillStyle>(DEFAULT_PILL_STYLE);
+
+  function reportSettingsError(label: string, error: unknown) {
+    console.error(`${label} failed`, error);
+    setSettingsError(`${label} could not be saved. ${readableError(error)}`);
+  }
+
+  async function saveSetting<T>(
+    label: string,
+    key: string,
+    next: T,
+    previous: T,
+    restore: (value: T) => void,
+  ) {
+    return saveWithRollback(
+      next,
+      previous,
+      (value) => api.setSetting(key, value),
+      restore,
+      (error) => reportSettingsError(label, error),
+    );
+  }
 
   // Poll the rolling dev channel on mount: a newer main build shows the
   // "Update now" pill without the user hunting for the button.
@@ -115,6 +141,9 @@ export default function Settings({
 
   useEffect(() => {
     refresh().catch((error) => console.error("settings refresh failed", error));
+    return () => {
+      refreshEpoch.current += 1;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -192,38 +221,71 @@ export default function Settings({
   }, []);
 
   async function refresh() {
-    const lang = (await api.getSetting<string>("language")) ?? "auto";
-    const preset = await api.getSetting<string>("flowBarPreset");
-    const hk = await api.getHotkey().catch(() => ["Right Shift"]);
-    const hkOptions = await api
-      .hotkeyOptions()
-      .catch(() => ["F1", "CapsLock", "Right Shift"]);
-    const ws = await api.hotkeyWatcherStatus().catch(() => "waiting-permissions");
-    const micList = await api.listMics().catch(() => [] as string[]);
-    const micPref = await api.getSetting<string>("micDevice");
-    const resolvedMic = await api.micDeviceStatus().catch(() => null);
-    const se = await api.getSetting<boolean>("soundEffects");
-    const ns = await api.getSetting<boolean>("noiseSuppression");
-    const vs = await api.getSetting<string>("voiceSensitivity");
-    const hmode = await api.getSetting<string>("hotkeyMode");
-    const as = await api.autostartStatus().catch(() => false);
-    const cm = await api.getSetting<boolean>("commandMode");
-    const ce = await api.getSetting<boolean>("cleanupEnabled");
-    const ss = await api.getSetting<boolean>("cleanupSkipShort");
-    const le = await api.getSetting<string>("sttLocalEngine");
-    const lm = await api.getSetting<string>("sttLocalModel");
-    const lms = await api.localModelStatus().catch(() => [] as LocalModelInfo[]);
-    const ps = await api.localParakeetStatus().catch(
-      () =>
-        ({
-          id: "parakeet-tdt-0.6b-v3",
-          available: false,
-          downloaded: false,
-        }) as LocalParakeetStatus,
-    );
-    const llmId = await api.getSetting<string>("llmLocalModel");
-    const llms = await api.localLlmStatus().catch(() => [] as LocalModelInfo[]);
-    const style = await loadPillStyle();
+    const epoch = ++refreshEpoch.current;
+    const getSetting = async <T,>(key: string, fallback: T): Promise<T> =>
+      (await api.getSetting<T>(key).catch(() => null)) ?? fallback;
+    const fallbackParakeet: LocalParakeetStatus = {
+      id: "parakeet-tdt-0.6b-v3",
+      available: false,
+      downloaded: false,
+    };
+    const [
+      lang,
+      preset,
+      hk,
+      hkOptions,
+      ws,
+      micList,
+      micPref,
+      resolvedMic,
+      se,
+      ns,
+      vs,
+      hmode,
+      as,
+      cm,
+      ce,
+      ss,
+      le,
+      lm,
+      lms,
+      ps,
+      llmId,
+      llms,
+      style,
+      micPermission,
+      axPermission,
+      inputPermission,
+    ] = await Promise.all([
+      getSetting("language", "auto"),
+      getSetting<string | null>("flowBarPreset", null),
+      api.getHotkey().catch(() => ["Right Shift"]),
+      api.hotkeyOptions().catch(() => ["F1", "CapsLock", "Right Shift"]),
+      api.hotkeyWatcherStatus().catch(() => "waiting-permissions"),
+      api.listMics().catch(() => [] as string[]),
+      getSetting<string | null>("micDevice", null),
+      api.micDeviceStatus().catch(() => null),
+      getSetting<boolean | null>("soundEffects", null),
+      getSetting<boolean | null>("noiseSuppression", null),
+      getSetting<string | null>("voiceSensitivity", null),
+      getSetting<string | null>("hotkeyMode", null),
+      api.autostartStatus().catch(() => false),
+      getSetting<boolean | null>("commandMode", null),
+      getSetting<boolean | null>("cleanupEnabled", null),
+      getSetting<boolean | null>("cleanupSkipShort", null),
+      getSetting<string | null>("sttLocalEngine", null),
+      getSetting<string | null>("sttLocalModel", null),
+      api.localModelStatus().catch(() => [] as LocalModelInfo[]),
+      api.localParakeetStatus().catch(() => fallbackParakeet),
+      getSetting<string | null>("llmLocalModel", null),
+      api.localLlmStatus().catch(() => [] as LocalModelInfo[]),
+      loadPillStyle().catch(() => DEFAULT_PILL_STYLE),
+      api.checkMicPermission().catch(() => false),
+      invokeAccessibility(),
+      api.inputMonitoringStatus().catch(() => false),
+    ]);
+
+    if (epoch !== refreshEpoch.current) return;
 
     // Auto is persisted as an empty string so the backend can pass no
     // language hint to Whisper. Normalize it back to the visible option.
@@ -258,9 +320,11 @@ export default function Settings({
     setLocalLlms(llms);
     setLocalLlmsLoaded(true);
     setPillStyle(style);
-    setMicrophone(await api.checkMicPermission().catch(() => false));
-    setAccessibility(await invokeAccessibility());
-    setInputMonitoring(await api.inputMonitoringStatus().catch(() => false));
+    savedPillStyle.current = style;
+    setMicrophone(micPermission);
+    setAccessibility(axPermission);
+    setInputMonitoring(inputPermission);
+    setSettingsError(null);
   }
 
   useEffect(() => {
@@ -295,61 +359,86 @@ export default function Settings({
 
   async function changeLocalLlm(id: string) {
     if (llmDownload !== null) return;
+    const previous = localLlm;
     setLocalLlm(id);
-    try {
-      await api.setLocalLlm(id);
-      const info = localLlms.find((m) => m.id === id);
-      if (info && !info.downloaded) {
-        await downloadLocalLlm(id);
-      }
-    } catch (e) {
-      console.error(e);
-      setLlmDownloadError({ model: id, message: readableError(e) });
+    const saved = await saveWithRollback(
+      id,
+      previous,
+      (value) => api.setLocalLlm(value),
+      setLocalLlm,
+      (error) => setLlmDownloadError({ model: id, message: readableError(error) }),
+    );
+    if (!saved) return;
+    const info = localLlms.find((m) => m.id === id);
+    if (info && !info.downloaded) {
+      await downloadLocalLlm(id);
     }
   }
 
   async function changeFlowbarPreset(preset: string) {
+    const previous = flowbarPreset;
     setFlowbarPreset(preset);
-    try {
-      await api.setFlowbarPreset(preset);
-    } catch (e) {
-      console.error(e);
-    }
+    await saveWithRollback(
+      preset,
+      previous,
+      (value) => api.setFlowbarPreset(value),
+      setFlowbarPreset,
+      (error) => reportSettingsError("Flow Bar position", error),
+    );
   }
 
   async function changePillStyle(patch: Partial<PillStyle>) {
     const next = { ...pillStyle, ...patch };
+    const previous = savedPillStyle.current;
     setPillStyle(next);
-    try {
-      await api.setSetting(PILL_STYLE_KEY, next);
-      await emit("flowbar-style-changed");
-    } catch (e) {
-      console.error(e);
+    const saved = await saveWithRollback(
+      next,
+      previous,
+      async (value) => {
+        await api.setSetting(PILL_STYLE_KEY, value);
+        await emit("flowbar-style-changed");
+      },
+      setPillStyle,
+      (error) => reportSettingsError("Pill appearance", error),
+    );
+    if (saved) {
+      savedPillStyle.current = next;
     }
   }
 
   async function changeHotkey(name: string) {
+    const previous = hotkey;
     setHotkey([name]);
-    try {
-      const applied = await api.setHotkey([name]);
+    let applied = [name];
+    const saved = await saveWithRollback(
+      [name],
+      previous,
+      async (value) => {
+        applied = await api.setHotkey(value);
+      },
+      setHotkey,
+      (error) => reportSettingsError("Hotkey", error),
+    );
+    if (saved) {
       setHotkey(applied);
-    } catch (e) {
-      console.error(e);
     }
   }
 
   async function changeLocalModel(id: string) {
     if (localDownload !== null) return;
+    const previous = localModel;
     setLocalModel(id);
-    try {
-      await api.setLocalModel(id);
-      const info = localModels.find((m) => m.id === id);
-      if (info && !info.downloaded) {
-        await downloadLocalModel(id);
-      }
-    } catch (e) {
-      console.error(e);
-      setLocalDownloadError({ model: id, message: readableError(e) });
+    const saved = await saveWithRollback(
+      id,
+      previous,
+      (value) => api.setLocalModel(value),
+      setLocalModel,
+      (error) => setLocalDownloadError({ model: id, message: readableError(error) }),
+    );
+    if (!saved) return;
+    const info = localModels.find((m) => m.id === id);
+    if (info && !info.downloaded) {
+      await downloadLocalModel(id);
     }
   }
 
@@ -396,104 +485,104 @@ export default function Settings({
 
   async function changeLocalEngine(engine: "whisper" | "parakeet") {
     if (engine === "parakeet" && !parakeetStatus.available) return;
-    try {
-      if (engine === "parakeet" && !parakeetStatus.downloaded) {
-        const downloaded = await downloadParakeet();
-        if (!downloaded) return;
-      }
-      await api.setSetting("sttLocalEngine", engine);
-      setLocalEngine(engine);
-    } catch (e) {
-      console.error(e);
-      setParakeetDownloadError(readableError(e));
+    const previous = localEngine;
+    if (engine === "parakeet" && !parakeetStatus.downloaded) {
+      const downloaded = await downloadParakeet();
+      if (!downloaded) return;
     }
+    await saveSetting(
+      "Transcription engine",
+      "sttLocalEngine",
+      engine,
+      previous,
+      setLocalEngine,
+    );
   }
 
   async function toggleCleanupEnabled() {
     const next = !cleanupEnabled;
     setCleanupEnabled(next);
-    try {
-      await api.setSetting("cleanupEnabled", next);
-    } catch (e) {
-      console.error(e);
-      setCleanupEnabled(!next);
-    }
+    await saveSetting("Cleanup", "cleanupEnabled", next, cleanupEnabled, setCleanupEnabled);
   }
 
   async function toggleSkipShort() {
     const next = !skipShort;
     setSkipShort(next);
-    try {
-      await api.setSetting("cleanupSkipShort", next);
-    } catch (e) {
-      console.error(e);
-      setSkipShort(!next);
-    }
+    await saveSetting(
+      "Short dictation setting",
+      "cleanupSkipShort",
+      next,
+      skipShort,
+      setSkipShort,
+    );
   }
 
   async function changeLanguage(code: string) {
     setLanguage(code);
-    await api.setSetting("language", code === "auto" ? "" : code);
+    await saveSetting("Language", "language", code === "auto" ? "" : code, language, setLanguage);
   }
 
   async function changeMic(name: string) {
+    const previous = mic;
     setMic(name);
-    try {
-      await api.setMicDevice(name || null);
+    const saved = await saveWithRollback(
+      name,
+      previous,
+      (value) => api.setMicDevice(value || null),
+      setMic,
+      (error) => reportSettingsError("Microphone", error),
+    );
+    if (saved) {
       setMicStatus(await api.micDeviceStatus().catch(() => null));
       setMicrophone(await api.checkMicPermission().catch(() => false));
-    } catch (e) {
-      console.error(e);
     }
   }
 
   async function toggleNoiseSuppression() {
     const next = !noiseSuppression;
     setNoiseSuppression(next);
-    await api.setSetting("noiseSuppression", next);
+    await saveSetting("Noise suppression", "noiseSuppression", next, noiseSuppression, setNoiseSuppression);
   }
 
   async function changeHotkeyMode(v: string) {
     setHotkeyMode(v);
-    await api.setSetting("hotkeyMode", v);
+    await saveSetting("Activation mode", "hotkeyMode", v, hotkeyMode, setHotkeyMode);
   }
 
   async function changeVoiceSensitivity(v: string) {
     setVoiceSensitivity(v);
-    await api.setSetting("voiceSensitivity", v);
+    await saveSetting(
+      "Voice sensitivity",
+      "voiceSensitivity",
+      v,
+      voiceSensitivity,
+      setVoiceSensitivity,
+    );
   }
 
   async function toggleSoundEffects() {
     const next = !soundEffects;
     setSoundEffects(next);
-    try {
-      await api.setSetting("soundEffects", next);
-    } catch (e) {
-      console.error(e);
-      setSoundEffects(!next);
-    }
+    await saveSetting("Sound effects", "soundEffects", next, soundEffects, setSoundEffects);
   }
 
   async function toggleAutostart() {
     const next = !autostart;
+    const previous = autostart;
     setAutostart(next);
-    try {
-      await api.setAutostart(next);
-    } catch (e) {
-      console.error(e);
-      setAutostart(!next);
-    }
+    await saveWithRollback(
+      next,
+      previous,
+      (value) => api.setAutostart(value),
+      setAutostart,
+      (error) => reportSettingsError("Launch at login", error),
+    );
   }
 
   async function toggleCommandMode() {
     const next = !commandMode;
     setCommandMode(next);
-    try {
-      await api.setSetting("commandMode", next);
-    } catch (e) {
-      console.error(e);
-      setCommandMode(!next);
-    }
+    await saveSetting("Voice commands", "commandMode", next, commandMode, setCommandMode);
   }
 
   async function checkForUpdate() {
@@ -518,8 +607,8 @@ export default function Settings({
   async function updateNow() {
     setUpdateStatus(`Updating to ${availableVersion}…`);
     try {
-      await api.installUpdate();
-      setUpdateStatus("Installed. Restarting…");
+      const installed = await api.installUpdate();
+      setUpdateStatus(updateInstallStatus(installed));
     } catch (e) {
       console.error(e);
       setUpdateStatus(String(e).replace(/^.*failed: /, "Update failed: "));
@@ -534,6 +623,18 @@ export default function Settings({
           Transcription, cleanup LLM, permissions, and shortcuts.
         </p>
       </div>
+      {settingsError && (
+        <div className="flex items-center justify-between gap-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          <span>{settingsError}</span>
+          <button
+            type="button"
+            onClick={() => setSettingsError(null)}
+            className="text-red-200 underline underline-offset-2 hover:text-white"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <button
         onClick={onRerunSetup}
@@ -596,7 +697,10 @@ export default function Settings({
         <SelectRow
             label="Language"
             value={language || "auto"}
-            options={LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
+            options={LANGUAGES.map((l) => ({
+              value: l.code || "auto",
+              label: l.label,
+            }))}
             onChange={changeLanguage}
           />
         </div>

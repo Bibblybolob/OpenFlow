@@ -3,34 +3,57 @@ import { api } from "../../lib/ipc";
 import { LANGUAGES } from "../../lib/languages";
 import type { Style as StyleType } from "../../lib/types";
 
+function readableError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "The style action failed. Try again.";
+}
+
 export default function Style() {
   const [styles, setStyles] = useState<StyleType[]>([]);
   const [appPattern, setAppPattern] = useState("");
   const [label, setLabel] = useState("");
   const [instructions, setInstructions] = useState("");
   const [language, setLanguage] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   async function refresh() {
-    setStyles(await api.listStyles());
+    try {
+      setStyles(await api.listStyles());
+      setError(null);
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    refresh();
+    refresh().catch(() => {});
   }, []);
 
   async function add() {
     if (!appPattern.trim()) return;
-    await api.upsertStyle(
-      appPattern,
-      label.trim() || appPattern,
-      instructions.trim(),
-      language || null,
-    );
-    setAppPattern("");
-    setLabel("");
-    setInstructions("");
-    setLanguage("");
-    refresh();
+    setBusy(true);
+    try {
+      await api.upsertStyle(
+        appPattern,
+        label.trim() || appPattern,
+        instructions.trim(),
+        language || null,
+      );
+      setAppPattern("");
+      setLabel("");
+      setInstructions("");
+      setLanguage("");
+      await refresh();
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -42,6 +65,7 @@ export default function Style() {
           frontmost app's identifier (e.g. “com.apple.Mail”).
         </p>
       </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
 
       <div className="flex flex-col gap-2">
         <div className="flex gap-2">
@@ -83,6 +107,7 @@ export default function Style() {
         </label>
         <button
           onClick={add}
+          disabled={busy}
           className="self-start rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
         >
           Save style
@@ -90,7 +115,8 @@ export default function Style() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {styles.length === 0 && (
+        {loading && <p className="text-sm text-neutral-600">Loading styles…</p>}
+        {!loading && styles.length === 0 && (
           <p className="text-sm text-neutral-600">
             No styles yet. Without one, FlowClone uses a neutral default tone.
           </p>
@@ -123,18 +149,34 @@ export default function Style() {
             <div className="flex shrink-0 items-center gap-1">
               <button
                 onClick={async () => {
-                  await api.setStyleEnabled(s.id, !s.enabled);
-                  refresh();
+                  setBusy(true);
+                  try {
+                    await api.setStyleEnabled(s.id, !s.enabled);
+                    await refresh();
+                  } catch (error) {
+                    setError(readableError(error));
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
+                disabled={busy}
                 className="rounded-md px-2 py-1 text-xs text-neutral-400 opacity-0 transition group-hover:opacity-100 hover:bg-white/5"
               >
                 {s.enabled ? "Disable" : "Enable"}
               </button>
               <button
                 onClick={async () => {
-                  await api.deleteStyle(s.id);
-                  refresh();
+                  setBusy(true);
+                  try {
+                    await api.deleteStyle(s.id);
+                    await refresh();
+                  } catch (error) {
+                    setError(readableError(error));
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
+                disabled={busy}
                 className="rounded-md px-2 py-1 text-xs text-neutral-500 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-400"
               >
                 Delete

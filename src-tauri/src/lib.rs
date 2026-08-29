@@ -614,7 +614,20 @@ fn local_parakeet_status() -> serde_json::Value {
 fn download_local_parakeet(app: tauri::AppHandle) -> store::Result<String> {
     #[cfg(feature = "parakeet")]
     {
-        cloud::local_parakeet::download_model(&app).map(|path| path.to_string_lossy().into_owned())
+        match cloud::local_parakeet::download_model(&app) {
+            Ok(path) => Ok(path.to_string_lossy().into_owned()),
+            Err(error) => {
+                let _ = app.emit(
+                    "local-parakeet-progress",
+                    serde_json::json!({
+                        "type": "error",
+                        "model": cloud::local_parakeet::MODEL_ID,
+                        "message": error.to_string(),
+                    }),
+                );
+                Err(error)
+            }
+        }
     }
     #[cfg(not(feature = "parakeet"))]
     {
@@ -852,7 +865,7 @@ async fn check_for_update(app: tauri::AppHandle) -> Result<Option<String>, Strin
 }
 
 #[tauri::command]
-async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+async fn install_update(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
     let updater = app
         .updater()
@@ -866,9 +879,13 @@ async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
             .download_and_install(|_, _| {}, || {})
             .await
             .map_err(|e| format!("update install failed: {e}"))?;
-        app.restart();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            app.restart();
+        });
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn load_hotkey_config(db: &Store) -> SharedHotkeyConfig {

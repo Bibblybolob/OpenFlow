@@ -13,7 +13,7 @@ const TRANSCRIPT_PAGE_SIZE = 100;
 function readableError(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
-  return "Re-paste failed. Copy the transcript and paste it manually.";
+  return "The history action failed. Try again.";
 }
 
 function StatCard({ label, value }: { label: string; value: string }) {
@@ -56,14 +56,21 @@ export default function Home() {
     id: number;
     message: string;
   } | null>(null);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const historyRequest = useRef(0);
 
   async function loadTranscripts(offset = 0, append = false) {
+    setLoadingHistory(true);
     const request = ++historyRequest.current;
-    const page = await api.listTranscripts(TRANSCRIPT_PAGE_SIZE, offset);
-    if (request !== historyRequest.current) return;
-    setTranscripts((current) => (append ? [...current, ...page] : page));
-    setHasMore(page.length === TRANSCRIPT_PAGE_SIZE);
+    try {
+      const page = await api.listTranscripts(TRANSCRIPT_PAGE_SIZE, offset);
+      if (request !== historyRequest.current) return;
+      setTranscripts((current) => (append ? [...current, ...page] : page));
+      setHasMore(page.length === TRANSCRIPT_PAGE_SIZE);
+    } finally {
+      setLoadingHistory(false);
+    }
   }
 
   async function refresh() {
@@ -75,7 +82,9 @@ export default function Home() {
   }
 
   useEffect(() => {
-    refresh().catch(() => {});
+    refresh().catch((error) =>
+      setHistoryActionError({ id: -1, message: readableError(error) }),
+    );
     api
       .hotkeyWatcherStatus()
       .then(setWatcher)
@@ -125,50 +134,87 @@ export default function Home() {
 
   async function onSearch(q: string) {
     setQuery(q);
-    const request = ++historyRequest.current;
-    const trimmed = q.trim();
-    const results = trimmed
-      ? await api.searchTranscripts(trimmed)
-      : await api.listTranscripts(TRANSCRIPT_PAGE_SIZE);
-    // SQLite requests can complete out of order while a user types quickly.
-    // Only the newest query is allowed to replace the visible history.
-    if (request !== historyRequest.current) return;
-    setTranscripts(results);
-    setHasMore(!trimmed && results.length === TRANSCRIPT_PAGE_SIZE);
+    try {
+      const request = ++historyRequest.current;
+      const trimmed = q.trim();
+      const results = trimmed
+        ? await api.searchTranscripts(trimmed)
+        : await api.listTranscripts(TRANSCRIPT_PAGE_SIZE);
+      // SQLite requests can complete out of order while a user types quickly.
+      // Only the newest query is allowed to replace the visible history.
+      if (request !== historyRequest.current) return;
+      setTranscripts(results);
+      setHasMore(!trimmed && results.length === TRANSCRIPT_PAGE_SIZE);
+      setHistoryActionError(null);
+    } catch (error) {
+      setHistoryActionError({ id: -1, message: readableError(error) });
+    }
   }
 
   async function onDelete(id: number) {
-    await api.deleteTranscript(id);
-    setTranscripts((current) => current.filter((transcript) => transcript.id !== id));
-    setStats(await api.stats());
+    setBusyId(id);
+    setHistoryActionError(null);
+    let deleted = false;
+    try {
+      await api.deleteTranscript(id);
+      deleted = true;
+      setTranscripts((current) => current.filter((transcript) => transcript.id !== id));
+      setStats(await api.stats());
+    } catch (error) {
+      setHistoryActionError({ id: deleted ? -1 : id, message: readableError(error) });
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  async function onCopy(text: string) {
-    await navigator.clipboard.writeText(text);
+  async function onCopy(id: number, text: string) {
+    setBusyId(id);
+    try {
+      await navigator.clipboard.writeText(text);
+      setHistoryActionError(null);
+    } catch (error) {
+      setHistoryActionError({ id, message: readableError(error) });
+    } finally {
+      setBusyId(null);
+    }
   }
 
   async function onFlag(id: number, flagged: boolean) {
-    await api.setFlagged(id, !flagged);
-    setTranscripts((current) =>
-      current.map((transcript) =>
-        transcript.id === id
-          ? { ...transcript, flagged: !flagged }
-          : transcript,
-      ),
-    );
+    setBusyId(id);
+    setHistoryActionError(null);
+    try {
+      await api.setFlagged(id, !flagged);
+      setTranscripts((current) =>
+        current.map((transcript) =>
+          transcript.id === id
+            ? { ...transcript, flagged: !flagged }
+            : transcript,
+        ),
+      );
+    } catch (error) {
+      setHistoryActionError({ id, message: readableError(error) });
+    } finally {
+      setBusyId(null);
+    }
   }
 
   async function onRepaste(transcript: Transcript) {
+    setBusyId(transcript.id);
     setHistoryActionError(null);
     try {
       await api.pasteText(transcript.text, transcript.targetApp);
     } catch (error) {
       setHistoryActionError({ id: transcript.id, message: readableError(error) });
+    } finally {
+      setBusyId(null);
     }
   }
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-8">
+      {historyActionError?.id === -1 && (
+        <p className="text-xs text-red-400">{historyActionError.message}</p>
+      )}
       {!watcherReady && (
         <div
           className={`flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 px-5 py-3 text-left ${
@@ -231,7 +277,10 @@ export default function Home() {
       />
 
       <div className="flex flex-col gap-3">
-        {transcripts.length === 0 && (
+        {loadingHistory && transcripts.length === 0 && (
+          <p className="text-sm text-neutral-600">Loading history…</p>
+        )}
+        {!loadingHistory && transcripts.length === 0 && (
           <p className="text-sm text-neutral-600">
             No transcripts yet. Use your hotkey and speak — history will appear
             here.
@@ -267,8 +316,9 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => onFlag(t.id, t.flagged)}
-                    aria-label={t.flagged ? "Unpin transcript" : "Pin transcript"}
-                    title={t.flagged ? "Unpin transcript" : "Pin transcript"}
+                    disabled={busyId === t.id}
+                    aria-label={t.flagged ? "Unstar transcript" : "Star transcript"}
+                    title={t.flagged ? "Unstar transcript" : "Star transcript"}
                     className={`rounded-md px-2 py-1 text-sm transition hover:bg-white/5 ${
                       t.flagged ? "text-amber-400" : "text-neutral-600 hover:text-neutral-300"
                     }`}
@@ -277,7 +327,8 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => onCopy(t.text)}
+                    onClick={() => onCopy(t.id, t.text)}
+                    disabled={busyId !== null}
                     className="rounded-md px-2 py-1 text-xs text-neutral-400 transition hover:bg-white/5 hover:text-neutral-200"
                   >
                     Copy
@@ -285,7 +336,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => onRepaste(t)}
-                    disabled={!t.targetApp}
+                    disabled={!t.targetApp || busyId !== null}
                     title={
                       t.targetApp
                         ? `Switch to ${t.targetApp} and paste this transcript`
@@ -298,6 +349,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => onDelete(t.id)}
+                    disabled={busyId !== null}
                     className="rounded-md px-2 py-1 text-xs text-neutral-500 transition hover:bg-red-500/10 hover:text-red-400"
                   >
                     Delete
@@ -310,10 +362,15 @@ export default function Home() {
         {hasMore && !query.trim() && (
           <button
             type="button"
-            onClick={() => loadTranscripts(transcripts.length, true)}
+            onClick={() =>
+              loadTranscripts(transcripts.length, true).catch((error) =>
+                setHistoryActionError({ id: -1, message: readableError(error) }),
+              )
+            }
+            disabled={loadingHistory}
             className="self-center rounded-lg border border-white/10 px-4 py-2 text-xs text-neutral-400 transition hover:bg-white/[0.05] hover:text-neutral-200"
           >
-            Load older transcripts
+            {loadingHistory ? "Loading…" : "Load older transcripts"}
           </button>
         )}
       </div>

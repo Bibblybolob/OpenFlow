@@ -35,6 +35,8 @@ export default function Hub() {
   if (!onboarded) {
     return (
       <Onboarding
+        pipelineState={state}
+        lastTranscriptId={lastTranscriptId}
         onComplete={() => {
           setOnboarded(true);
           setPage("home");

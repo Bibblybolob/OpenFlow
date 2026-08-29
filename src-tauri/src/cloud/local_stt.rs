@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Cursor, Read as _, Write as _};
+use std::io::{Cursor, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -192,37 +192,19 @@ fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
         Some(m) => format!("{MODEL_URL_BASE}/{}?download=true", m.file_name),
         None => format!("{MODEL_URL_BASE}/ggml-{model_id}-q5_1.bin?download=true"),
     };
-    let mut resp = super::http_client()?
-        .get(&url)
-        .send()
-        .map_err(|e| StoreError::Other(format!("model download failed: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(StoreError::Other(format!(
-            "model download failed ({})",
-            resp.status()
-        )));
-    }
-
     std::fs::create_dir_all(models_dir())?;
     let partial = dest.with_extension("part");
     let mut file = File::create(&partial)?;
 
-    // Content-Length may be absent; fall back to the catalog approximation.
-    let total = resp.content_length().unwrap_or(0);
-    let mut downloaded: usize = 0;
+    let fallback_total = catalog_model(model_id)
+        .map(|model| model.approx_mb * 1024 * 1024)
+        .unwrap_or(0);
+    let mut downloaded = 0u64;
     let mut last_emit_mb: u64 = 0;
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = resp
-            .read(&mut buf)
-            .map_err(|e| StoreError::Other(format!("model download failed: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])?;
-        downloaded += n;
-
-        let mb = (downloaded / (1024 * 1024)) as u64;
+    let (expected_size, _downloaded) = super::stream_download(&url, |chunk| {
+        file.write_all(chunk)?;
+        downloaded += chunk.len() as u64;
+        let mb = downloaded / (1024 * 1024);
         if mb > last_emit_mb {
             last_emit_mb = mb;
             let _ = app.emit(
@@ -230,11 +212,13 @@ fn download_model_inner(app: &AppHandle, model_id: &str) -> Result<PathBuf> {
                 DownloadProgress {
                     model: model_id.to_string(),
                     downloaded_mb: mb,
-                    total_mb: total / (1024 * 1024),
+                    total_mb: fallback_total / (1024 * 1024),
                 },
             );
         }
-    }
+        Ok(())
+    })?;
+    let total = expected_size.unwrap_or(fallback_total);
     file.flush()?;
     drop(file);
 

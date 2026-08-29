@@ -2,25 +2,48 @@ import { useEffect, useState } from "react";
 import { api } from "../../lib/ipc";
 import type { Snippet as SnippetType } from "../../lib/types";
 
+function readableError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "The snippet action failed. Try again.";
+}
+
 export default function Snippets() {
   const [snippets, setSnippets] = useState<SnippetType[]>([]);
   const [trigger, setTrigger] = useState("");
   const [body, setBody] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   async function refresh() {
-    setSnippets(await api.listSnippets());
+    try {
+      setSnippets(await api.listSnippets());
+      setError(null);
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    refresh();
+    refresh().catch(() => {});
   }, []);
 
   async function add() {
     if (!trigger.trim() || !body.trim()) return;
-    await api.addSnippet(trigger, body);
-    setTrigger("");
-    setBody("");
-    refresh();
+    setBusy(true);
+    try {
+      await api.addSnippet(trigger, body);
+      setTrigger("");
+      setBody("");
+      await refresh();
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -32,6 +55,7 @@ export default function Snippets() {
           links, and FAQs.
         </p>
       </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
 
       <div className="flex flex-col gap-2">
         <input
@@ -50,6 +74,7 @@ export default function Snippets() {
         />
         <button
           onClick={add}
+          disabled={busy}
           className="self-start rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
         >
           Add snippet
@@ -57,7 +82,8 @@ export default function Snippets() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {snippets.length === 0 && (
+        {loading && <p className="text-sm text-neutral-600">Loading snippets…</p>}
+        {!loading && snippets.length === 0 && (
           <p className="text-sm text-neutral-600">No snippets yet.</p>
         )}
         {snippets.map((s) => (
@@ -73,9 +99,17 @@ export default function Snippets() {
             </div>
             <button
               onClick={async () => {
-                await api.deleteSnippet(s.id);
-                refresh();
+                setBusy(true);
+                try {
+                  await api.deleteSnippet(s.id);
+                  await refresh();
+                } catch (error) {
+                  setError(readableError(error));
+                } finally {
+                  setBusy(false);
+                }
               }}
+              disabled={busy}
               className="shrink-0 rounded-md px-2 py-1 text-xs text-neutral-500 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-400"
             >
               Delete

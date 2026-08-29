@@ -179,8 +179,14 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![text, raw_text, language, duration_ms, word_count, target_app],
         )?;
+        let id = conn.last_insert_rowid();
+        let created_at = conn.query_row(
+            "SELECT created_at FROM transcripts WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
         Ok(Transcript {
-            id: conn.last_insert_rowid(),
+            id,
             text: text.to_string(),
             raw_text: raw_text.to_string(),
             language: language.to_string(),
@@ -188,11 +194,13 @@ impl Store {
             word_count,
             target_app: target_app.to_string(),
             flagged: false,
-            created_at: now_iso(&conn)?,
+            created_at,
         })
     }
 
     pub fn list_transcripts(&self, limit: i64, offset: i64) -> Result<Vec<Transcript>> {
+        let limit = limit.clamp(1, 200);
+        let offset = offset.max(0);
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, raw_text, language, duration_ms, word_count, target_app, flagged, created_at
@@ -449,6 +457,11 @@ impl Store {
                 "snippet trigger cannot be empty".to_string(),
             ));
         }
+        if body.trim().is_empty() {
+            return Err(StoreError::Other(
+                "snippet body cannot be empty".to_string(),
+            ));
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO snippets (trigger, body) VALUES (?1, ?2)
@@ -632,14 +645,6 @@ fn map_style(row: &rusqlite::Row<'_>) -> rusqlite::Result<Style> {
     })
 }
 
-fn now_iso(conn: &Connection) -> Result<String> {
-    Ok(
-        conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |r| {
-            r.get(0)
-        })?,
-    )
-}
-
 fn local_date_today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
@@ -693,6 +698,16 @@ mod tests {
         assert_eq!(list[0].word_count, 3);
         assert_eq!(list[0].target_app, "Slack");
         assert!(!list[0].flagged);
+    }
+
+    #[test]
+    fn transcript_pagination_is_clamped() {
+        let store = memory_store();
+        store.insert_transcript("one", "", "en", 500, "").unwrap();
+        store.insert_transcript("two", "", "en", 500, "").unwrap();
+
+        assert_eq!(store.list_transcripts(0, -10).unwrap().len(), 1);
+        assert_eq!(store.list_transcripts(500, -10).unwrap().len(), 2);
     }
 
     #[test]

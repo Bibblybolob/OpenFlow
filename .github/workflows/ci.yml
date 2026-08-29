@@ -18,7 +18,7 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -47,6 +47,9 @@ jobs:
 
       - name: Frontend typecheck & build
         run: npm run build
+
+      - name: Frontend tests
+        run: npm test
 
       - name: Rust fmt & clippy
         run: |
@@ -82,7 +85,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -95,7 +98,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -124,8 +127,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: "OpenFlow v__VERSION__"
-          releaseBody: "See the assets below to download and install OpenFlow."
+          releaseName: "FlowClone v__VERSION__"
+          releaseBody: "See the assets below to download and install FlowClone."
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -160,7 +163,7 @@ jobs:
             tauriArgs: "--bundles nsis"
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -173,7 +176,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -247,15 +250,15 @@ jobs:
             find "$d" \
               \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app.tar.gz.sig" \
                  -o -name "*-setup.exe" -o -name "*-setup.exe.sig" \
-                 -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \
-                 -o -name "latest.json" \) \
+                 -o -name "*.nsis.zip" -o -name "*.nsis.zip.sig" \) \
               -exec cp {} dist-dev/ \;
           done
           # Both macOS legs emit identically-named updater files; prefix with
-          # the triple so they can't clobber each other in the merged upload.
+          # the triple and version so releases can retain the previous set
+          # until the new manifest is live.
           for f in dist-dev/FlowClone.app.tar.gz dist-dev/FlowClone.app.tar.gz.sig; do
             [ -f "$f" ] || continue
-            mv "$f" "dist-dev/${{ matrix.triple }}.${f##*/}"
+            mv "$f" "dist-dev/${{ matrix.triple }}.FlowClone_${DEV_VERSION}.app.tar.gz${f##*.app.tar.gz}"
           done
           ls -la dist-dev/
           [ -n "$(ls -A dist-dev)" ]
@@ -266,9 +269,9 @@ jobs:
           path: dist-dev/*
           if-no-files-found: error
 
-  # Single writer for the rolling 'dev' release: deletes previous assets,
-  # uploads this run's full set, then merges the per-platform updater
-  # manifests into one latest.json covering every platform.
+  # Single writer for the rolling 'dev' release: validates and uploads the
+  # new set first, points latest.json at it second, and deletes old assets
+  # last. A failed publication therefore leaves the prior update usable.
   dev-publish:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: [check, dev-build]
@@ -276,7 +279,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # AFTER checkout (checkout would otherwise wipe dist-dev).
       - uses: actions/download-artifact@v4
@@ -296,17 +299,8 @@ jobs:
             gh release create dev --title "Latest main build" --prerelease \
               --notes "Rolling build of main. Installed apps offer it via Update now."
 
-      # Asset names embed the stamped version, so old ones would pile up on
-      # the rolling release — clear them before uploading this run's set.
-      - name: Clear previous dev assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api repos/${{ github.repository }}/releases/tags/dev --jq '.assets[].id' |
-            xargs -r -n1 -I{} gh api -X DELETE repos/${{ github.repository }}/releases/assets/{}
-
       # Build latest.json from the .sig files: each sig names its artifact
-      # and carries the minisign signature; the download URL is the fixed
+      # and carries the minisign signature; the download URL is the versioned
       # per-release asset path the updater can fetch.
       - name: Generate updater manifest
         run: |
@@ -318,15 +312,18 @@ jobs:
             const base='https://github.com/${{ github.repository }}/releases/download/dev/';
             const platforms={};
             const targets=[
-              ['aarch64-apple-darwin.FlowClone.app.tar.gz','darwin-aarch64'],
-              ['x86_64-apple-darwin.FlowClone.app.tar.gz','darwin-x86_64'],
+              ['aarch64-apple-darwin.FlowClone_'+version+'.app.tar.gz','darwin-aarch64'],
+              ['x86_64-apple-darwin.FlowClone_'+version+'.app.tar.gz','darwin-x86_64'],
               ['FlowClone_'+version+'_x64-setup.exe','windows-x86_64']
             ];
             for(const f of fs.readdirSync(dir).filter(f=>f.endsWith('.sig'))){
               const hit=targets.find(t => t[0]+'.sig'===f);
               if(!hit){ console.log('skip (no updater target): '+f); continue; }
               const [art,plat]=hit;
-              platforms[plat]={signature:fs.readFileSync(path.join(dir,f),'utf8').trim(), url:base+art};
+              const signature=fs.readFileSync(path.join(dir,f),'utf8').trim();
+              const artifactPath=path.join(dir,art);
+              if(!signature || !fs.existsSync(artifactPath) || fs.statSync(artifactPath).size < 1024) throw new Error('missing or invalid updater pair: '+art);
+              platforms[plat]={signature, url:base+art};
             }
             const manifest={version, notes:'Rolling build of main ('+(process.env.GITHUB_SHA||'').slice(0,7)+')', pub_date:new Date().toISOString(), platforms};
             fs.writeFileSync(path.join(dir,'latest.json'), JSON.stringify(manifest,null,2));
@@ -341,7 +338,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload dev dist-dev/* --clobber
+          for asset in dist-dev/*; do
+            [ "$(basename "$asset")" = "latest.json" ] || gh release upload dev "$asset" --clobber
+          done
+
+      - name: Publish updater pointer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          backup_dir="$(mktemp -d)"
+          if gh release download dev --pattern latest.json --dir "$backup_dir" >/dev/null 2>&1; then
+            backup_manifest="$backup_dir/latest.json"
+          else
+            backup_manifest=""
+          fi
+          if ! gh release upload dev dist-dev/latest.json --clobber; then
+            if [ -n "$backup_manifest" ] && [ -f "$backup_manifest" ]; then
+              gh release upload dev "$backup_manifest" --clobber || true
+            fi
+            exit 1
+          fi
 
       - name: Point release at this run
         env:
@@ -349,6 +365,19 @@ jobs:
           DEV_VERSION: ${{ needs.dev-build.outputs.version }}
         run: |
           gh release edit dev --title "Latest main build ($DEV_VERSION)" \
-            --notes "Rolling build of main @ ${{ github.sha }}.
+          --notes "Rolling build of main @ ${{ github.sha }}.
 
           Version \`$DEV_VERSION\` · installed apps offer this automatically via Update now."
+
+      # Remove obsolete versioned installers only after latest.json points to
+      # the complete new set.
+      - name: Remove obsolete dev assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/releases/tags/dev --jq '.assets[] | "\(.id) \(.name)"' |
+            while read -r asset_id asset_name; do
+              [ "$asset_name" = "latest.json" ] && continue
+              [ -f "dist-dev/$asset_name" ] && continue
+              gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$asset_id"
+            done

@@ -36,6 +36,28 @@ pub fn stream_transcribe(
     Ok(result)
 }
 
+/// Runs one optional preview only when the local recognizer is available.
+/// Preview work must never queue behind a final transcription. Returning
+/// `None` means another inference already owns the shared recognizer.
+pub fn try_stream_transcribe(
+    db: &Store,
+    wav_bytes: &[u8],
+    language: &str,
+    prompt: Option<&str>,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<Option<TranscriptionResult>> {
+    let lock = TRANSCRIPTION_LOCK.get_or_init(|| Mutex::new(()));
+    let guard = match lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    let _guard = guard;
+    let result = super::local_stt::transcribe_local(db, wav_bytes, language, prompt)?;
+    on_delta(&result.text);
+    Ok(Some(result))
+}
+
 pub fn build_prompt(db: &Store) -> Result<String> {
     let mut prompt = String::new();
     for entry in db.list_dictionary()? {

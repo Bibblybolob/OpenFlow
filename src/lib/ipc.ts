@@ -165,7 +165,7 @@ export const api = {
 
   checkForUpdate: () => invoke<string | null>("check_for_update"),
 
-  installUpdate: () => invoke<void>("install_update"),
+  installUpdate: () => invoke<boolean>("install_update"),
 
   appVersion: () => invoke<string>("app_version"),
 

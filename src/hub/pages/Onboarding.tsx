@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { motion } from "framer-motion";
 import { api } from "../../lib/ipc";
-import { usePipelineState } from "../usePipelineState";
 
 type Step = "welcome" | "permissions" | "model" | "hotkey" | "done";
 
@@ -26,7 +25,15 @@ interface ModelProgressPayload {
   message?: string;
 }
 
-export default function Onboarding({ onComplete }: { onComplete: () => void }) {
+export default function Onboarding({
+  onComplete,
+  pipelineState,
+  lastTranscriptId,
+}: {
+  onComplete: () => void;
+  pipelineState: "idle" | "recording" | "transcribing" | "injecting" | "paused";
+  lastTranscriptId: number | null;
+}) {
   const [step, setStep] = useState<Step>("welcome");
   const [accessibility, setAccessibility] = useState<CheckState>({ status: "pending" });
   const [inputMonitoring, setInputMonitoring] = useState<CheckState>({ status: "pending" });
@@ -37,7 +44,8 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   const [selectedModel, setSelectedModel] = useState("base");
   const [modelDownload, setModelDownload] = useState<string | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
-  const { lastTranscriptId } = usePipelineState();
+  const [finishError, setFinishError] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
 
   useEffect(() => {
     api.getHotkey().then(setHotkey).catch(() => setHotkey(["Right Shift"]));
@@ -132,24 +140,35 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
   }, []);
 
   useEffect(() => {
-    if (step === "hotkey" && lastTranscriptId !== null) {
+    if (step === "hotkey" && pipelineState === "idle" && lastTranscriptId !== null) {
       finish(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lastTranscriptId, step]);
+  }, [lastTranscriptId, pipelineState, step]);
 
   async function finish(success: boolean) {
-    await api.setSetting("onboardingComplete", success);
-    await api.setFlowbarVisible(true);
-    onComplete();
+    if (finishing) return;
+    setFinishing(true);
+    setFinishError(null);
+    try {
+      await api.setSetting("onboardingComplete", success);
+      await api.setFlowbarVisible(true);
+      onComplete();
+    } catch (error) {
+      setFinishError(readableError(error));
+    } finally {
+      setFinishing(false);
+    }
   }
 
   async function chooseModel(id: string) {
+    const previous = selectedModel;
     setSelectedModel(id);
     setModelError(null);
     try {
       await api.setLocalModel(id);
     } catch (error) {
+      setSelectedModel(previous);
       setModelError(readableError(error));
     }
   }
@@ -225,6 +244,8 @@ export default function Onboarding({ onComplete }: { onComplete: () => void }) {
           <HotkeyTest
             hotkey={hotkey.join(" + ")}
             toggleMode={toggleMode}
+            error={finishError}
+            finishing={finishing}
             onSkip={() => finish(true)}
           />
         )}
@@ -359,7 +380,7 @@ function Welcome({ onNext }: { onNext: () => void }) {
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-400 to-violet-600 text-2xl font-bold text-white">
         F
       </div>
-      <h1 className="text-xl font-semibold text-white">Welcome to OpenFlow</h1>
+      <h1 className="text-xl font-semibold text-white">Welcome to FlowClone</h1>
       <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-neutral-400">
         Use the dictation hotkey and speak naturally — ramble, pause, or
         change your mind mid-sentence. Flow understands what you mean, edits
@@ -399,7 +420,7 @@ function Permissions({
         A few permissions
       </h1>
       <p className="mx-auto mt-2 max-w-sm text-center text-sm text-neutral-400">
-        OpenFlow needs these to hear you and to type for you. Everything stays
+        FlowClone needs these to hear you and to type for you. Everything stays
         on your device.
       </p>
 
@@ -494,10 +515,14 @@ function Permissions({
 function HotkeyTest({
   hotkey,
   toggleMode,
+  error,
+  finishing,
   onSkip,
 }: {
   hotkey: string;
   toggleMode: boolean;
+  error: string | null;
+  finishing: boolean;
   onSkip: () => void;
 }) {
   return (
@@ -518,8 +543,10 @@ function HotkeyTest({
           Listening for your first dictation…
         </span>
       </div>
+      {error && <p className="mt-4 text-xs text-red-400">{error}</p>}
       <button
         onClick={onSkip}
+        disabled={finishing}
         className="mt-8 text-xs text-neutral-500 underline-offset-2 hover:text-neutral-300 hover:underline"
       >
         Skip for now

@@ -1,6 +1,6 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -584,6 +584,75 @@ struct Metering {
     mic_voiced: Arc<std::sync::atomic::AtomicU8>,
 }
 
+#[derive(Default)]
+struct ActiveSessionClock {
+    active_since: Option<Instant>,
+    elapsed: Duration,
+}
+
+impl ActiveSessionClock {
+    fn begin(&mut self) {
+        self.active_since = Some(Instant::now());
+        self.elapsed = Duration::ZERO;
+    }
+
+    fn pause(&mut self) {
+        if let Some(started) = self.active_since.take() {
+            self.elapsed += started.elapsed();
+        }
+    }
+
+    fn resume(&mut self) {
+        if self.active_since.is_none() {
+            self.active_since = Some(Instant::now());
+        }
+    }
+
+    fn end(&mut self) {
+        self.pause();
+        self.elapsed = Duration::ZERO;
+    }
+
+    fn total(&self) -> Duration {
+        self.elapsed
+            + self
+                .active_since
+                .map(|started| started.elapsed())
+                .unwrap_or_default()
+    }
+}
+
+fn invalidate_session(
+    session_gen: &Arc<std::sync::atomic::AtomicU64>,
+    session_clock: &Arc<Mutex<ActiveSessionClock>>,
+    metering: &Metering,
+) {
+    session_gen.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut clock) = session_clock.lock() {
+        clock.end();
+    }
+    reset_mic_meter(metering);
+}
+
+fn pause_session(
+    session_gen: &Arc<std::sync::atomic::AtomicU64>,
+    session_clock: &Arc<Mutex<ActiveSessionClock>>,
+    metering: &Metering,
+) {
+    session_gen.fetch_add(1, Ordering::Relaxed);
+    if let Ok(mut clock) = session_clock.lock() {
+        clock.pause();
+    }
+    reset_mic_meter(metering);
+}
+
+fn reset_mic_meter(metering: &Metering) {
+    metering
+        .mic_level
+        .store(0.0f32.to_bits(), Ordering::Relaxed);
+    metering.mic_voiced.store(0, Ordering::Relaxed);
+}
+
 fn handler_loop(
     app: AppHandle,
     db: Arc<Store>,
@@ -608,16 +677,15 @@ fn handler_loop(
     // counter that invalidates stale hands-free auto-stop watchdogs.
     let last_voice_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let session_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let session_clock = Arc::new(Mutex::new(ActiveSessionClock::default()));
     // Cursor and text for best-effort phrase previews. The final worker still
     // transcribes the complete recording, so a preview can never replace the
     // authoritative result or make cancellation unsafe.
     let mut preview_cursor = 0usize;
     let mut preview_text = String::new();
-    let mut preview_busy = false;
-    let Metering {
-        mic_level,
-        mic_voiced,
-    } = metering;
+    let mut preview_busy: Option<u64> = None;
+    let mic_level = Arc::clone(&metering.mic_level);
+    let mic_voiced = Arc::clone(&metering.mic_voiced);
     {
         let emitter = app.clone();
         let last_emit = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -655,9 +723,17 @@ fn handler_loop(
                 {
                     // Pressing the hotkey while paused resumes capture.
                     audio.resume();
+                    if let Ok(mut clock) = session_clock.lock() {
+                        clock.resume();
+                    }
                     last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                     let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                    spawn_max_session_timer(&timer_tx, generation);
+                    spawn_max_session_timer(
+                        &timer_tx,
+                        Arc::clone(&session_gen),
+                        Arc::clone(&session_clock),
+                        generation,
+                    );
                     spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                     if mode == Mode::HandsFree {
                         spawn_handsfree_watchdog(
@@ -673,7 +749,7 @@ fn handler_loop(
                 if toggle && mode == Mode::Ptt {
                     // Toggle activation: second press ends the session,
                     // exactly like releasing in push-to-talk.
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     finish_session(
                         &app,
                         &db,
@@ -713,12 +789,20 @@ fn handler_loop(
                     }
                     crate::begin_context_capture();
                     reset_live_preview(&mut preview_cursor, &mut preview_text, &mut preview_busy);
+                    if let Ok(mut clock) = session_clock.lock() {
+                        clock.begin();
+                    }
                     last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                     mode = Mode::Ptt;
                     pending_tap = false;
                     second_tap_down = false;
                     let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                    spawn_max_session_timer(&timer_tx, generation);
+                    spawn_max_session_timer(
+                        &timer_tx,
+                        Arc::clone(&session_gen),
+                        Arc::clone(&session_clock),
+                        generation,
+                    );
                     spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                     transition(&app, &db, &state, PipelineState::Recording, None, None);
                 }
@@ -748,7 +832,7 @@ fn handler_loop(
                     continue;
                 }
                 if mode != Mode::Idle {
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     finish_session(
                         &app,
                         &db,
@@ -791,6 +875,7 @@ fn handler_loop(
                         TapAction::EnterHandsFree => {
                             // Double-tap confirmed: restart capture cleanly and
                             // go hands-free.
+                            invalidate_session(&session_gen, &session_clock, &metering);
                             audio.discard();
                             current_app = inject::frontmost_app();
                             audio.set_device(crate::configured_mic(&db));
@@ -811,6 +896,9 @@ fn handler_loop(
                                     &mut preview_text,
                                     &mut preview_busy,
                                 );
+                                if let Ok(mut clock) = session_clock.lock() {
+                                    clock.begin();
+                                }
                                 mode = Mode::HandsFree;
                                 pending_tap = false;
                                 first_tap_at = None;
@@ -830,7 +918,12 @@ fn handler_loop(
                                     Arc::clone(&session_gen),
                                     gen,
                                 );
-                                spawn_max_session_timer(&timer_tx, gen);
+                                spawn_max_session_timer(
+                                    &timer_tx,
+                                    Arc::clone(&session_gen),
+                                    Arc::clone(&session_clock),
+                                    gen,
+                                );
                                 spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), gen);
                             }
                         }
@@ -838,7 +931,7 @@ fn handler_loop(
                             // The second tap came too late for double-tap, or
                             // the pending first tap timed out. Finish like a
                             // normal quick release.
-                            session_gen.fetch_add(1, Ordering::Relaxed);
+                            invalidate_session(&session_gen, &session_clock, &metering);
                             finish_session(
                                 &app,
                                 &db,
@@ -856,7 +949,7 @@ fn handler_loop(
                     }
                 }
                 Mode::HandsFree => {
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     finish_session(
                         &app,
                         &db,
@@ -877,7 +970,7 @@ fn handler_loop(
                 if mode != Mode::Idle {
                     // Esc cancels the active dictation and discards audio.
                     audio.discard();
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     mode = Mode::Idle;
                     pending_tap = false;
                     first_tap_at = None;
@@ -916,7 +1009,7 @@ fn handler_loop(
             }
             Msg::Stop => {
                 if mode != Mode::Idle {
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     finish_session(
                         &app,
                         &db,
@@ -938,9 +1031,17 @@ fn handler_loop(
                     let was_paused = state.load(Ordering::Relaxed) == PipelineState::Paused.as_u8();
                     if was_paused {
                         audio.resume();
+                        if let Ok(mut clock) = session_clock.lock() {
+                            clock.resume();
+                        }
                         last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                         let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                        spawn_max_session_timer(&timer_tx, generation);
+                        spawn_max_session_timer(
+                            &timer_tx,
+                            Arc::clone(&session_gen),
+                            Arc::clone(&session_clock),
+                            generation,
+                        );
                         spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                         if mode == Mode::HandsFree {
                             spawn_handsfree_watchdog(
@@ -953,7 +1054,12 @@ fn handler_loop(
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     } else {
                         audio.pause();
-                        session_gen.fetch_add(1, Ordering::Relaxed);
+                        pause_session(&session_gen, &session_clock, &metering);
+                        // Do not let an old preview occupy the new
+                        // generation's one-worker slot after resume. Keep the
+                        // visible text; the final transcription remains the
+                        // authority when the session ends.
+                        preview_busy = None;
                         pending_tap = false;
                         first_tap_at = None;
                         second_tap_down = false;
@@ -964,7 +1070,7 @@ fn handler_loop(
             Msg::Cancel => {
                 worker_flags.cancelled.store(true, Ordering::Relaxed);
                 audio.discard();
-                session_gen.fetch_add(1, Ordering::Relaxed);
+                invalidate_session(&session_gen, &session_clock, &metering);
                 mode = Mode::Idle;
                 pending_tap = false;
                 first_tap_at = None;
@@ -1001,7 +1107,7 @@ fn handler_loop(
                     // No second tap arrived: treat as a normal release.
                     pending_tap = false;
                     first_tap_at = None;
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     finish_session(
                         &app,
                         &db,
@@ -1017,7 +1123,7 @@ fn handler_loop(
             }
             Msg::AutoStop { generation } => {
                 if generation == session_gen.load(Ordering::Relaxed) && mode != Mode::Idle {
-                    session_gen.fetch_add(1, Ordering::Relaxed);
+                    invalidate_session(&session_gen, &session_clock, &metering);
                     finish_session(
                         &app,
                         &db,
@@ -1041,7 +1147,7 @@ fn handler_loop(
                 {
                     continue;
                 }
-                if preview_busy {
+                if preview_busy.is_some() {
                     continue;
                 }
                 let end_sample = audio.sample_count();
@@ -1064,10 +1170,11 @@ fn handler_loop(
                 match audio.snapshot_since(start_sample) {
                     Ok((Some(recording), copied_end)) => {
                         preview_cursor = copied_end;
-                        preview_busy = true;
+                        preview_busy = Some(generation);
                         spawn_live_preview_worker(
                             &db,
                             &timer_tx,
+                            Arc::clone(&session_gen),
                             generation,
                             recording,
                             current_app.clone(),
@@ -1088,10 +1195,10 @@ fn handler_loop(
                 }
             }
             Msg::PreviewDone { generation, text } => {
+                clear_preview_slot(&mut preview_busy, generation);
                 if generation != session_gen.load(Ordering::Relaxed) {
                     continue;
                 }
-                preview_busy = false;
                 let Some(text) = text.filter(|value| !value.trim().is_empty()) else {
                     continue;
                 };
@@ -1124,9 +1231,17 @@ fn handler_loop(
                             &mut preview_text,
                             &mut preview_busy,
                         );
+                        if let Ok(mut clock) = session_clock.lock() {
+                            clock.begin();
+                        }
                         last_voice_ms.store(unix_ms(), Ordering::Relaxed);
                         let generation = session_gen.fetch_add(1, Ordering::Relaxed) + 1;
-                        spawn_max_session_timer(&timer_tx, generation);
+                        spawn_max_session_timer(
+                            &timer_tx,
+                            Arc::clone(&session_gen),
+                            Arc::clone(&session_clock),
+                            generation,
+                        );
                         spawn_preview_scheduler(&timer_tx, Arc::clone(&session_gen), generation);
                         transition(&app, &db, &state, PipelineState::Recording, None, None);
                     }
@@ -1136,10 +1251,16 @@ fn handler_loop(
     }
 }
 
-fn reset_live_preview(cursor: &mut usize, text: &mut String, busy: &mut bool) {
+fn reset_live_preview(cursor: &mut usize, text: &mut String, busy: &mut Option<u64>) {
     *cursor = 0;
     text.clear();
-    *busy = false;
+    *busy = None;
+}
+
+fn clear_preview_slot(busy: &mut Option<u64>, generation: u64) {
+    if *busy == Some(generation) {
+        *busy = None;
+    }
 }
 
 /// Runs one low-cost scheduler for a recording generation. Changing the
@@ -1167,6 +1288,7 @@ fn spawn_preview_scheduler(
 fn spawn_live_preview_worker(
     db: &Arc<Store>,
     tx: &mpsc::Sender<Msg>,
+    session_gen: Arc<std::sync::atomic::AtomicU64>,
     generation: u64,
     recording: crate::audio::Recording,
     target_app: String,
@@ -1176,20 +1298,24 @@ fn spawn_live_preview_worker(
     let max_frame_rms = recording.max_frame_rms;
     std::thread::spawn(move || {
         let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if session_gen.load(Ordering::Relaxed) != generation {
+                return Ok(None);
+            }
             let language = session_language(&db, &target_app);
             let prompt = db_prompt(&db);
             let mut ignore_delta = |_text: &str| {};
-            stt::stream_transcribe(
+            stt::try_stream_transcribe(
                 &db,
                 &recording.wav,
                 &language,
                 Some(&prompt),
                 &mut ignore_delta,
             )
-            .map(|result| result.text)
+            .map(|result| result.map(|value| value.text))
         }))
         .ok()
         .and_then(|result| result.ok())
+        .flatten()
         .and_then(|value| filter_preview_text(value, max_frame_rms));
 
         let _ = tx.send(Msg::PreviewDone { generation, text });
@@ -1261,11 +1387,26 @@ fn spawn_tap_judge(tx: &mpsc::Sender<Msg>, generation: u64) {
     });
 }
 
-fn spawn_max_session_timer(tx: &mpsc::Sender<Msg>, generation: u64) {
+fn spawn_max_session_timer(
+    tx: &mpsc::Sender<Msg>,
+    session_gen: Arc<std::sync::atomic::AtomicU64>,
+    session_clock: Arc<Mutex<ActiveSessionClock>>,
+    generation: u64,
+) {
     let tx = tx.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(MAX_SESSION_SECS));
-        let _ = tx.send(Msg::AutoStop { generation });
+    std::thread::spawn(move || loop {
+        if session_gen.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        let elapsed = session_clock
+            .lock()
+            .map(|clock| clock.total())
+            .unwrap_or_default();
+        if elapsed >= Duration::from_secs(MAX_SESSION_SECS) {
+            let _ = tx.send(Msg::AutoStop { generation });
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
     });
 }
 
@@ -1429,15 +1570,13 @@ pub(crate) fn run_session(
     // are forwarded to the pill as `stt-partial` (cumulative text) so the
     // user watches words appear instead of staring at bouncing dots.
     let stt_started = timings.mark("session-prep", timings.started);
-    let partial_app = app.clone();
+    let mut ignored_partial = |_cumulative: &str| {};
     let result = stt::stream_transcribe(
         db,
         &recording.wav,
         &language,
         Some(&db_prompt(db)),
-        &mut |cumulative| {
-            let _ = partial_app.emit("stt-partial", serde_json::json!({ "text": cumulative }));
-        },
+        &mut ignored_partial,
     );
     let stt_done = timings.mark("stt", stt_started);
     if processing_cancelled(app, db, state, worker_cancelled) {
@@ -1477,6 +1616,7 @@ pub(crate) fn run_session(
         return;
     }
     let raw_text = crate::emoji::apply(&raw_text);
+    let _ = app.emit("stt-partial", serde_json::json!({ "text": raw_text }));
 
     let data = SessionData::new(recording.duration_ms, target_app, language);
 
@@ -1809,6 +1949,34 @@ mod tests {
             filter_preview_text("play music".to_string(), 0.0).as_deref(),
             Some("play music")
         );
+    }
+
+    #[test]
+    fn active_session_clock_excludes_paused_time_and_resets_on_end() {
+        let mut clock = ActiveSessionClock {
+            active_since: None,
+            elapsed: Duration::from_secs(12),
+        };
+        clock.pause();
+        assert_eq!(clock.total(), Duration::from_secs(12));
+
+        clock.resume();
+        assert!(clock.active_since.is_some());
+        clock.pause();
+        assert!(clock.total() >= Duration::from_secs(12));
+
+        clock.end();
+        assert_eq!(clock.total(), Duration::ZERO);
+        assert!(clock.active_since.is_none());
+    }
+
+    #[test]
+    fn stale_preview_completion_does_not_release_new_preview_slot() {
+        let mut busy = Some(7);
+        clear_preview_slot(&mut busy, 6);
+        assert_eq!(busy, Some(7));
+        clear_preview_slot(&mut busy, 7);
+        assert_eq!(busy, None);
     }
 
     #[test]

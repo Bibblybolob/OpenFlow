@@ -34,9 +34,12 @@ FlowClone has these main functions:
 - FlowClone supports 18 specified languages and automatic language detection.
 - The Flow Bar shows the microphone level and the pipeline state.
 - The Flow Bar can show a live preview of completed speech phrases while you dictate.
+- Live previews may skip a phrase when final transcription is active. The final
+  transcription is the authoritative result.
 - The system tray gives controls for the dictation session, the Hub, and the application.
-- The Hub stores searchable transcript history. You can flag, copy, delete, or paste a transcript again.
+- The Hub stores searchable transcript history. You can star, copy, delete, or paste a transcript again.
 - The onboarding procedure checks permissions and helps you download the first transcription model.
+- The active capture limit is six minutes. Paused time does not count.
 
 ## Data and network use
 
@@ -154,6 +157,12 @@ Open **Settings**, and then go to **Cleanup** to download a cleanup model.
 
 FlowClone verifies the downloaded file size. If a download is incomplete, select **Retry**.
 
+The download has no total time limit. It can run longer than two minutes when
+data continues to arrive. The download stops after 60 seconds with no data.
+
+Cleanup has a 15-second limit. If cleanup does not finish, FlowClone pastes
+the raw transcription.
+
 ## Platform information
 
 ### macOS
@@ -180,7 +189,7 @@ If the target application runs as administrator, start FlowClone as administrato
 
 ## Build and release process
 
-Each push to `main` starts tests and a rolling development build. CI builds macOS and Windows packages.
+Each push to `main` starts frontend and Rust tests and a rolling development build. CI builds macOS and Windows packages.
 
 CI publishes the development packages in the `dev` release. FlowClone can show the new version in **Settings**.
 
@@ -228,6 +237,12 @@ The `ci.yml` workflow runs the standard checks on macOS and Windows.
 Open **Settings**, and then go to **Transcription**. Select **Whisper**, and then select **Download** for a model.
 
 If the model list does not appear, select **Retry**. Restart FlowClone if the list still does not appear.
+
+### FlowClone shows a music label
+
+FlowClone ignores complete sound labels such as `[Music]`, `[Silence]`, and
+`[Noise]`. It does not paste or save these labels. Real speech such as “play
+music” remains available.
 
 ### macOS shows the "FlowClone is damaged" message
 

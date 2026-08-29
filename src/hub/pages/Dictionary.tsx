@@ -2,27 +2,50 @@ import { useEffect, useState } from "react";
 import { api } from "../../lib/ipc";
 import type { DictionaryEntry, VocabSuggestion } from "../../lib/types";
 
+function readableError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "The dictionary action failed. Try again.";
+}
+
 export default function Dictionary() {
   const [entries, setEntries] = useState<DictionaryEntry[]>([]);
   const [suggestions, setSuggestions] = useState<VocabSuggestion[]>([]);
   const [term, setTerm] = useState("");
   const [replacement, setReplacement] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   async function refresh() {
-    setEntries(await api.listDictionary());
-    setSuggestions(await api.listVocabSuggestions().catch(() => []));
+    try {
+      setEntries(await api.listDictionary());
+      setSuggestions(await api.listVocabSuggestions().catch(() => []));
+      setError(null);
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    refresh();
+    refresh().catch(() => {});
   }, []);
 
   async function add() {
     if (!term.trim()) return;
-    await api.addDictionaryTerm(term, replacement.trim() || undefined);
-    setTerm("");
-    setReplacement("");
-    refresh();
+    setBusy(true);
+    try {
+      await api.addDictionaryTerm(term, replacement.trim() || undefined);
+      setTerm("");
+      setReplacement("");
+      await refresh();
+    } catch (e) {
+      setError(readableError(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -34,6 +57,7 @@ export default function Dictionary() {
           replacement to auto-correct a common misspelling.
         </p>
       </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
 
       {suggestions.length > 0 && (
         <section className="flex flex-col gap-2 rounded-xl border border-amber-400/20 bg-amber-400/[0.04] p-4">
@@ -58,18 +82,34 @@ export default function Dictionary() {
               <div className="flex shrink-0 gap-1">
                 <button
                   onClick={async () => {
-                    await api.acceptVocabSuggestion(s.id);
-                    refresh();
+                    setBusy(true);
+                    try {
+                      await api.acceptVocabSuggestion(s.id);
+                      await refresh();
+                    } catch (e) {
+                      setError(readableError(e));
+                    } finally {
+                      setBusy(false);
+                    }
                   }}
+                  disabled={busy}
                   className="rounded-md bg-emerald-500/20 px-2.5 py-1 text-xs text-emerald-300 transition hover:bg-emerald-500/30"
                 >
                   Accept
                 </button>
                 <button
                   onClick={async () => {
-                    await api.dismissVocabSuggestion(s.id);
-                    refresh();
+                    setBusy(true);
+                    try {
+                      await api.dismissVocabSuggestion(s.id);
+                      await refresh();
+                    } catch (e) {
+                      setError(readableError(e));
+                    } finally {
+                      setBusy(false);
+                    }
                   }}
+                  disabled={busy}
                   className="rounded-md px-2.5 py-1 text-xs text-neutral-500 transition hover:bg-white/5"
                 >
                   Dismiss
@@ -97,6 +137,7 @@ export default function Dictionary() {
         />
         <button
           onClick={add}
+          disabled={busy}
           className="rounded-lg bg-indigo-500/90 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
         >
           Add
@@ -104,7 +145,8 @@ export default function Dictionary() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {entries.length === 0 && (
+        {loading && <p className="text-sm text-neutral-600">Loading dictionary…</p>}
+        {!loading && entries.length === 0 && (
           <p className="text-sm text-neutral-600">
             No entries yet. Words you star get higher priority.
           </p>
@@ -123,9 +165,17 @@ export default function Dictionary() {
             <div className="flex items-center gap-1">
               <button
                 onClick={async () => {
-                  await api.setDictionaryStarred(e.id, !e.starred);
-                  refresh();
+                  setBusy(true);
+                  try {
+                    await api.setDictionaryStarred(e.id, !e.starred);
+                    await refresh();
+                  } catch (error) {
+                    setError(readableError(error));
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
+                disabled={busy}
                 className={`rounded-md px-2 py-1 text-xs transition hover:bg-white/5 ${
                   e.starred ? "text-amber-400" : "text-neutral-600"
                 }`}
@@ -134,9 +184,17 @@ export default function Dictionary() {
               </button>
               <button
                 onClick={async () => {
-                  await api.deleteDictionaryTerm(e.id);
-                  refresh();
+                  setBusy(true);
+                  try {
+                    await api.deleteDictionaryTerm(e.id);
+                    await refresh();
+                  } catch (error) {
+                    setError(readableError(error));
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
+                disabled={busy}
                 className="rounded-md px-2 py-1 text-xs text-neutral-500 opacity-0 transition group-hover:opacity-100 hover:bg-red-500/10 hover:text-red-400"
               >
                 Delete

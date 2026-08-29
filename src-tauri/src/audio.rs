@@ -121,6 +121,7 @@ pub struct AudioEngine {
     shared: Arc<Mutex<Shared>>,
     stream: Option<cpal::Stream>,
     started_at: Option<Instant>,
+    active_duration: Duration,
     on_level: Option<Arc<dyn Fn(f32, bool) + Send + Sync>>,
     device_pref: Option<String>,
     noise_suppression: bool,
@@ -240,6 +241,7 @@ impl AudioEngine {
             })),
             stream: None,
             started_at: None,
+            active_duration: Duration::ZERO,
             on_level: None,
             device_pref: None,
             noise_suppression: true,
@@ -362,6 +364,7 @@ impl AudioEngine {
             .map_err(|e| AudioError::Stream(e.to_string()))?;
         self.stream = Some(stream);
         self.started_at = Some(Instant::now());
+        self.active_duration = Duration::ZERO;
         Ok(())
     }
 
@@ -417,17 +420,23 @@ impl AudioEngine {
         if let Some(stream) = self.stream.take() {
             drop(stream);
         }
-        let started_at = match self.started_at.take() {
-            Some(t) => t,
-            None => return Ok(None),
-        };
+        let active_now = self
+            .started_at
+            .take()
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        if self.active_duration.is_zero() && active_now.is_zero() {
+            return Ok(None);
+        }
+        let active_duration = self.active_duration + active_now;
+        self.active_duration = Duration::ZERO;
         let (samples, capture_rate) = {
             let mut shared = self.shared.lock().unwrap();
             let samples = std::mem::take(&mut shared.samples);
             (samples, shared.sample_rate)
         };
 
-        let elapsed_ms = started_at.elapsed().as_millis() as i64;
+        let elapsed_ms = active_duration.as_millis() as i64;
         // Ignore accidental taps shorter than ~250ms.
         if elapsed_ms < 250 || samples.is_empty() {
             return Ok(None);
@@ -458,15 +467,18 @@ impl AudioEngine {
             drop(stream);
         }
         self.started_at = None;
+        self.active_duration = Duration::ZERO;
         self.shared.lock().unwrap().samples.clear();
     }
 
-    /// Suspends the capture stream without ending the session. Elapsed
-    /// wall-clock time keeps counting, so paused stretches still count
-    /// toward the session duration (v1 tradeoff).
+    /// Suspends the capture stream without ending the session. Paused time is
+    /// not included in the session duration or the active-session limit.
     pub fn pause(&mut self) {
         if let Some(stream) = self.stream.as_ref() {
             let _ = stream.pause();
+        }
+        if let Some(started) = self.started_at.take() {
+            self.active_duration += started.elapsed();
         }
     }
 
@@ -474,6 +486,9 @@ impl AudioEngine {
     pub fn resume(&mut self) {
         if let Some(stream) = self.stream.as_ref() {
             let _ = stream.play();
+            if self.started_at.is_none() {
+                self.started_at = Some(Instant::now());
+            }
         }
     }
 

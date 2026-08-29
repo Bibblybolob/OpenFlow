@@ -142,41 +142,22 @@ fn download_model_inner(app: &AppHandle) -> Result<PathBuf> {
     let archive_path = models_dir.join(format!(".{MODEL_ID}.tar.bz2.part"));
     let staging_dir = models_dir.join(format!(".{MODEL_ID}.part"));
     let destination = model_dir();
+    let previous_dir = models_dir.join(format!(".{MODEL_ID}.previous"));
 
     // A previous failed extraction is never reused. The final destination is
     // left intact until a complete replacement is ready.
     let _ = fs::remove_file(&archive_path);
     let _ = fs::remove_dir_all(&staging_dir);
+    let _ = fs::remove_dir_all(&previous_dir);
 
     let result = (|| {
-        let mut response = super::http_client()?
-            .get(MODEL_ARCHIVE_URL)
-            .send()
-            .map_err(|e| StoreError::Other(format!("Parakeet download failed: {e}")))?;
-        if !response.status().is_success() {
-            return Err(StoreError::Other(format!(
-                "Parakeet download failed ({})",
-                response.status()
-            )));
-        }
-
-        let expected_size = response.content_length();
-        let total = expected_size.unwrap_or(0);
         let mut output = File::create(&archive_path)?;
-        let mut downloaded = 0usize;
+        let mut downloaded = 0u64;
         let mut last_emit_mb = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = response
-                .read(&mut buffer)
-                .map_err(|e| StoreError::Other(format!("Parakeet download failed: {e}")))?;
-            if count == 0 {
-                break;
-            }
-            output.write_all(&buffer[..count])?;
-            downloaded += count;
-
-            let downloaded_mb = (downloaded / (1024 * 1024)) as u64;
+        let (expected_size, _downloaded) = super::stream_download(MODEL_ARCHIVE_URL, |chunk| {
+            output.write_all(chunk)?;
+            downloaded += chunk.len() as u64;
+            let downloaded_mb = downloaded / (1024 * 1024);
             if downloaded_mb > last_emit_mb {
                 last_emit_mb = downloaded_mb;
                 let _ = app.emit(
@@ -184,11 +165,12 @@ fn download_model_inner(app: &AppHandle) -> Result<PathBuf> {
                     DownloadProgress {
                         model: MODEL_ID.to_string(),
                         downloaded_mb,
-                        total_mb: total / (1024 * 1024),
+                        total_mb: 0,
                     },
                 );
             }
-        }
+            Ok(())
+        })?;
         output.flush()?;
         let archive_size = output
             .metadata()
@@ -209,8 +191,18 @@ fn download_model_inner(app: &AppHandle) -> Result<PathBuf> {
             ));
         }
 
-        let _ = fs::remove_dir_all(&destination);
-        fs::rename(&staging_dir, &destination)?;
+        // Keep the previous valid bundle until the complete staging bundle
+        // is in place. Restore it if the final rename fails.
+        if destination.exists() {
+            fs::rename(&destination, &previous_dir)?;
+        }
+        if let Err(error) = fs::rename(&staging_dir, &destination) {
+            if previous_dir.exists() {
+                let _ = fs::rename(&previous_dir, &destination);
+            }
+            return Err(error.into());
+        }
+        let _ = fs::remove_dir_all(&previous_dir);
         let _ = app.emit(
             "local-parakeet-progress",
             serde_json::json!({ "type": "done", "model": MODEL_ID }),
